@@ -36,6 +36,12 @@ const deleteUser = async (req, res) => {
     // 1. Cascade Delete: wipe out all their associated documents
     await supabase.from('documents').delete().eq('user_id', userId);
     
+    // 1.5. Clean up password_resets using the user's email
+    const { data: userToDelete } = await supabase.from('users').select('email').eq('id', userId).single();
+    if (userToDelete?.email) {
+      await supabase.from('password_resets').delete().eq('email', userToDelete.email);
+    }
+
     // 2. Delete from public.users table
     const { error: dbError } = await supabase.from('users').delete().eq('id', userId);
     if (dbError) throw dbError;
