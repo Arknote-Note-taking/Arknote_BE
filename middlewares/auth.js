@@ -13,6 +13,7 @@ const requireAuth = async (req, res, next) => {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     
     if (error || !user) {
+      console.error('requireAuth Error: auth.getUser failed', error);
       return res.status(401).json({ error: 'Request is not authorized' });
     }
 
@@ -23,6 +24,7 @@ const requireAuth = async (req, res, next) => {
       .single();
 
     if (dbError || !dbUser) {
+      console.error('requireAuth Error: User not found in DB', dbError);
       return res.status(401).json({ error: 'User does not exist in database' });
     }
 
@@ -33,6 +35,7 @@ const requireAuth = async (req, res, next) => {
     
     next();
   } catch (error) {
+    console.error('requireAuth Exception:', error);
     res.status(401).json({ error: 'Request is not authorized' });
   }
 };
