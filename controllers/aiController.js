@@ -1,5 +1,5 @@
 const supabase = require('../config/supabaseClient');
-const { summarizeDocument, answerQuestion } = require('../services/aiService');
+const { summarizeDocument, answerQuestion, extractMetadata } = require('../services/aiService');
 
 const triggerSummarize = async (req, res) => {
   try {
@@ -66,4 +66,71 @@ const triggerChat = async (req, res) => {
   }
 };
 
-module.exports = { triggerSummarize, triggerQnA, triggerChat };
+const triggerReanalyze = async (req, res) => {
+  try {
+    const { documentId } = req.body;
+    const { data: doc, error: err1 } = await supabase.from('documents').select('*').eq('id', documentId).single();
+    if (err1 || !doc || doc.is_deleted) return res.status(404).json({ error: 'Document not found' });
+    
+    if (req.user.role !== 'admin' && doc.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const metadata = await extractMetadata(doc.content);
+    const summary = await summarizeDocument(doc.content);
+
+    res.status(200).json({
+      title: metadata.title || doc.title,
+      subject: metadata.subject || doc.subject,
+      summary: summary || doc.summary
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const triggerFolderChat = async (req, res) => {
+  try {
+    const { folderId, question } = req.body;
+    if (!folderId) return res.status(400).json({ error: 'Folder ID is required' });
+    if (!question) return res.status(400).json({ error: 'Question is required' });
+
+    // 1. Check folder
+    const { data: folder, error: folderErr } = await supabase
+      .from('folders')
+      .select('*')
+      .eq('id', folderId)
+      .single();
+
+    if (folderErr || !folder) return res.status(404).json({ error: 'Folder not found' });
+    if (folder.user_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    // 2. Fetch all documents in folder
+    const { data: docs, error: docsErr } = await supabase
+      .from('documents')
+      .select('title, content')
+      .eq('folder_id', folderId)
+      .eq('is_deleted', false);
+
+    if (docsErr) throw docsErr;
+    if (!docs || docs.length === 0) {
+      return res.status(200).json({ answer: 'Không tìm thấy tài liệu nào trong thư mục này để phân tích.' });
+    }
+
+    // 3. Concatenate content
+    let aggregatedContext = '';
+    docs.forEach((doc, idx) => {
+      aggregatedContext += `--- Tài liệu ${idx + 1}: ${doc.title} ---\nNội dung:\n${doc.content || ''}\n\n`;
+    });
+
+    // 4. Call answerQuestion
+    const answer = await answerQuestion(aggregatedContext, question);
+    res.status(200).json({ answer });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { triggerSummarize, triggerQnA, triggerChat, triggerReanalyze, triggerFolderChat };
