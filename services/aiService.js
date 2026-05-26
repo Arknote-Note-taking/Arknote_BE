@@ -11,7 +11,7 @@ const extractMetadata = async (text) => {
   if (useMock) {
     return {
       title: "Sample Document Title",
-      subject: "Computer Science",
+      subject: "Khác",
       tags: ["AI", "Parsing", "Mocked"]
     };
   }
@@ -27,7 +27,7 @@ const extractMetadata = async (text) => {
   try {
     return JSON.parse(response.choices[0].message.content);
   } catch (err) {
-    return { title: 'Unknown', subject: 'General', tags: [] };
+    return { title: 'Unknown', subject: 'Khác', tags: [] };
   }
 };
 

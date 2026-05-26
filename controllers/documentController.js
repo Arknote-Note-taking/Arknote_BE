@@ -31,6 +31,13 @@ const uploadDocument = async (req, res) => {
     const rawEmbedding = await createEmbedding(content);
     const embedding = JSON.stringify(rawEmbedding);
 
+    // Determine subject: if no subject is sent, try AI. If AI fails, use 'Khác'
+    let subjectVal = req.body.subject || metadata.subject || 'Khác';
+    const normalizedSub = subjectVal.trim().toLowerCase();
+    if (normalizedSub === 'auto' || normalizedSub === 'general' || normalizedSub === 'unknown' || !subjectVal.trim()) {
+      subjectVal = 'Khác';
+    }
+
     // 4. Save to DB
     const { data: doc, error } = await supabase
       .from('documents')
@@ -38,10 +45,11 @@ const uploadDocument = async (req, res) => {
         title: originalName,
         content,
         tags: metadata.tags || [],
-        subject: req.body.subject || metadata.subject || 'General',
+        subject: subjectVal,
         file_url: fileUrl,
         embedding: embedding,
-        user_id: req.user.id
+        user_id: req.user.id,
+        folder_id: req.body.folder_id || null
       }])
       .select()
       .single();
@@ -130,11 +138,60 @@ const deleteDocument = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const { error } = await supabase.from('documents').delete().eq('id', req.params.id);
+    const { error } = await supabase.from('documents').update({ is_deleted: true }).eq('id', req.params.id);
     if (error) throw error;
     
-    req.io.emit('document_deleted', { _id: req.params.id });
-    res.status(200).json({ message: 'Permanently deleted successfully' });
+    req.io.emit('document_deleted', { id: req.params.id }); // Use standard id field
+    res.status(200).json({ message: 'Soft deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getDeletedDocuments = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+    const { data: docs, error } = await supabase
+      .from('documents')
+      .select('id, title, summary, tags, subject, file_url, user_id, created_at')
+      .eq('is_deleted', true);
+    if (error) throw error;
+    
+    const { data: users, error: userErr } = await supabase.from('users').select('id, email');
+    const userMap = {};
+    if (!userErr && users) {
+      users.forEach(u => { userMap[u.id] = u.email; });
+    }
+    
+    const formatted = docs.map(d => ({ 
+      ...d, 
+      _id: d.id,
+      user_email: userMap[d.user_id] || 'Unknown' 
+    }));
+    res.status(200).json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const restoreDocument = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+    const { data: doc, error } = await supabase
+      .from('documents')
+      .update({ is_deleted: false })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    
+    const responseDoc = { ...doc, _id: doc.id };
+    req.io.emit('document_created', responseDoc);
+    res.status(200).json(responseDoc);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -194,5 +251,7 @@ module.exports = {
   getDocumentById,
   updateDocument,
   deleteDocument,
-  getDashboardStats
+  getDashboardStats,
+  getDeletedDocuments,
+  restoreDocument
 };

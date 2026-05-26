@@ -9,12 +9,34 @@ const {
   getDocumentById,
   updateDocument,
   deleteDocument,
-  getDashboardStats
+  getDashboardStats,
+  getDeletedDocuments,
+  restoreDocument
 } = require('../controllers/documentController');
+
+const {
+  getFolders,
+  createFolder,
+  getFolderById,
+  deleteFolder,
+  addDocsToFolder
+} = require('../controllers/folderController');
+
 const { searchDocuments, getKnowledgeGraph, getRelatedDocuments } = require('../controllers/advancedController');
 
 // Apply auth middleware to all document routes
 router.use(requireAuth);
+
+// Folder routes (must be placed before general parameterized document routes)
+router.get('/folders', getFolders);
+router.post('/folders', createFolder);
+router.get('/folders/:id', getFolderById);
+router.delete('/folders/:id', deleteFolder);
+router.post('/folders/:id/add-documents', addDocsToFolder);
+
+// Soft delete routes
+router.get('/deleted', getDeletedDocuments);
+router.post('/:id/restore', restoreDocument);
 
 // Advanced features
 router.get('/search', searchDocuments);
