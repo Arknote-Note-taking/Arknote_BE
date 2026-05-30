@@ -19,7 +19,8 @@ const {
   createFolder,
   getFolderById,
   deleteFolder,
-  addDocsToFolder
+  addDocsToFolder,
+  updateFolder
 } = require('../controllers/folderController');
 
 const { searchDocuments, getKnowledgeGraph, getRelatedDocuments } = require('../controllers/advancedController');
@@ -31,6 +32,7 @@ router.use(requireAuth);
 router.get('/folders', getFolders);
 router.post('/folders', createFolder);
 router.get('/folders/:id', getFolderById);
+router.put('/folders/:id', updateFolder);
 router.delete('/folders/:id', deleteFolder);
 router.post('/folders/:id/add-documents', addDocsToFolder);
 
