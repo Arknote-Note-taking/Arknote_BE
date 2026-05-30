@@ -203,11 +203,34 @@ const updateFolder = async (req, res) => {
   }
 };
 
+const clearFoldersDocuments = async (req, res) => {
+  try {
+    const { folderIds } = req.body;
+    if (!folderIds || !Array.isArray(folderIds) || folderIds.length === 0) {
+      return res.status(400).json({ error: 'folderIds array is required' });
+    }
+
+    const { error } = await supabase
+      .from('documents')
+      .update({ folder_id: null })
+      .in('folder_id', folderIds)
+      .eq('user_id', req.user.id);
+
+    if (error) throw error;
+
+    res.status(200).json({ message: 'Documents cleared from folders successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getFolders,
   createFolder,
   getFolderById,
   deleteFolder,
   addDocsToFolder,
-  updateFolder
+  updateFolder,
+  clearFoldersDocuments
 };
+

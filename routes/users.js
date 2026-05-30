@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middlewares/auth');
 const upload = require('../config/multerConfig');
-const { getUsers, deleteUser, getProfile, updateProfile, uploadAvatar } = require('../controllers/userController');
+const { getUsers, deleteUser, getProfile, updateProfile, uploadAvatar, upgradeToPro } = require('../controllers/userController');
 
 // All user routes require authentication
 router.use(requireAuth);
@@ -11,6 +11,7 @@ router.use(requireAuth);
 router.get('/profile', getProfile);
 router.put('/profile', updateProfile);
 router.post('/avatar', upload.single('avatar'), uploadAvatar);
+router.post('/upgrade-pro', upgradeToPro);
 
 // Admin only routes
 router.get('/', getUsers);

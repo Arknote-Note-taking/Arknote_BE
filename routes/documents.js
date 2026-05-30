@@ -20,7 +20,8 @@ const {
   getFolderById,
   deleteFolder,
   addDocsToFolder,
-  updateFolder
+  updateFolder,
+  clearFoldersDocuments
 } = require('../controllers/folderController');
 
 const { searchDocuments, getKnowledgeGraph, getRelatedDocuments } = require('../controllers/advancedController');
@@ -31,6 +32,7 @@ router.use(requireAuth);
 // Folder routes (must be placed before general parameterized document routes)
 router.get('/folders', getFolders);
 router.post('/folders', createFolder);
+router.post('/folders/clear-documents', clearFoldersDocuments);
 router.get('/folders/:id', getFolderById);
 router.put('/folders/:id', updateFolder);
 router.delete('/folders/:id', deleteFolder);
