@@ -171,10 +171,43 @@ const addDocsToFolder = async (req, res) => {
   }
 };
 
+const updateFolder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name) return res.status(400).json({ error: 'Folder name is required' });
+
+    const { data: folder, error: folderErr } = await supabase
+      .from('folders')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (folderErr || !folder) return res.status(404).json({ error: 'Folder not found' });
+    if (folder.user_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const { data: updatedFolder, error: updateErr } = await supabase
+      .from('folders')
+      .update({ name })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) throw updateErr;
+
+    res.status(200).json({ ...updatedFolder, _id: updatedFolder.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getFolders,
   createFolder,
   getFolderById,
   deleteFolder,
-  addDocsToFolder
+  addDocsToFolder,
+  updateFolder
 };

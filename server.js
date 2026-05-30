@@ -14,7 +14,7 @@ const userRoutes = require('./routes/users');
 const app = express();
 const server = http.createServer(app);
 
-const allowedOrigins = process.env.CORS_ORIGIN
+const allowedOrigins = process.env.CORS_ORIGIN && process.env.CORS_ORIGIN !== '*'
   ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
   : '*';
 
