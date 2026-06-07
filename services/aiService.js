@@ -41,7 +41,7 @@ const extractMetadata = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-flash-lite-latest',
+      model: 'gemini-flash-latest',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
