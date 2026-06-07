@@ -1,5 +1,6 @@
 const supabase = require('../config/supabaseClient');
-const { summarizeDocument, answerQuestion, extractMetadata } = require('../services/aiService');
+const { summarizeDocument, answerQuestion, extractMetadata, generateQuiz } = require('../services/aiService');
+const { isUserPro } = require('./userController');
 
 const triggerSummarize = async (req, res) => {
   try {
@@ -77,12 +78,11 @@ const triggerReanalyze = async (req, res) => {
     }
 
     const metadata = await extractMetadata(doc.content);
-    const summary = await summarizeDocument(doc.content);
 
     res.status(200).json({
       title: metadata.title || doc.title,
       subject: metadata.subject || doc.subject,
-      summary: summary || doc.summary
+      summary: metadata.summary || doc.summary
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -133,4 +133,36 @@ const triggerFolderChat = async (req, res) => {
   }
 };
 
-module.exports = { triggerSummarize, triggerQnA, triggerChat, triggerReanalyze, triggerFolderChat };
+const triggerQuiz = async (req, res) => {
+  try {
+    const { documentId } = req.body;
+    if (!documentId) return res.status(400).json({ error: 'Document ID is required' });
+
+    // Check if user is Pro
+    const userPro = isUserPro(req.user.id);
+    if (!userPro && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Tính năng tạo Quiz trắc nghiệm chỉ dành riêng cho tài khoản Pro. Vui lòng nâng cấp tài khoản!' });
+    }
+
+    const { data: doc, error: err1 } = await supabase
+      .from('documents')
+      .select('*')
+      .eq('id', documentId)
+      .single();
+
+    if (err1 || !doc || doc.is_deleted) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    if (req.user.role !== 'admin' && doc.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const quiz = await generateQuiz(doc.content);
+    res.status(200).json({ quiz });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { triggerSummarize, triggerQnA, triggerChat, triggerReanalyze, triggerFolderChat, triggerQuiz };

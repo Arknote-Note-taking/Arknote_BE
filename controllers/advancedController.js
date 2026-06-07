@@ -82,17 +82,45 @@ const getKnowledgeGraph = async (req, res) => {
       nodes.push({ id: doc.id, title: doc.title, subject: doc.subject, tags: doc.tags || [] });
     });
 
-    // Create Edges by O(N^2) similarity matching
+    // Create Edges by matching semantic similarity or shared metadata (tags, subject)
     for (let i = 0; i < docs.length; i++) {
       let embI = docs[i].embedding;
       if (typeof embI === 'string') embI = JSON.parse(embI);
+      const tagsI = docs[i].tags || [];
+      const subI = docs[i].subject;
       
       for (let j = i + 1; j < docs.length; j++) {
         let embJ = docs[j].embedding;
         if (typeof embJ === 'string') embJ = JSON.parse(embJ);
+        const tagsJ = docs[j].tags || [];
+        const subJ = docs[j].subject;
         
-        const sim = cosineSimilarity(embI, embJ);
-        if (sim > 0.85) { // Graph linkage threshold
+        let sim = 0;
+        let isConnected = false;
+        
+        if (embI && embJ && embI.length > 0 && embJ.length > 0) {
+          sim = cosineSimilarity(embI, embJ);
+          if (sim > 0.60) { // Reduced threshold for semantic similarity
+            isConnected = true;
+          }
+        }
+        
+        // Fallback 1: Connect if they share at least one tag (case insensitive)
+        if (!isConnected && tagsI.length > 0 && tagsJ.length > 0) {
+          const commonTags = tagsI.filter(t => tagsJ.some(tj => tj.toLowerCase().trim() === t.toLowerCase().trim()));
+          if (commonTags.length > 0) {
+            isConnected = true;
+            sim = 0.5 + (0.1 * Math.min(commonTags.length, 3)); // Weight proportional to shared tags
+          }
+        }
+
+        // Fallback 2: Connect if they share the same subject (excluding 'Khác')
+        if (!isConnected && subI && subJ && subI !== 'Khác' && subI === subJ) {
+          isConnected = true;
+          sim = 0.5;
+        }
+
+        if (isConnected) {
           edges.push({
             source: docs[i].id,
             target: docs[j].id,
