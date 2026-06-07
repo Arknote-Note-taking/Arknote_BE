@@ -2,12 +2,33 @@ const supabase = require('../config/supabaseClient');
 const { extractTextFromFile } = require('../services/fileExtractionService');
 const { extractMetadata, summarizeDocument } = require('../services/aiService');
 const { createEmbedding, cosineSimilarity } = require('../services/embeddingService');
+const { isUserPro } = require('./userController');
 const path = require('path');
 const fs = require('fs');
 
 const uploadDocument = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    // Limit check for non-pro users
+    const userPro = isUserPro(req.user.id);
+    if (!userPro && req.user.role !== 'admin') {
+      const { count, error: countErr } = await supabase
+        .from('documents')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', req.user.id)
+        .eq('is_deleted', false);
+
+      if (countErr) throw countErr;
+
+      if (count >= 5) {
+        // Delete uploaded temp file to avoid junk in uploads folder
+        if (req.file.path && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(403).json({ error: 'Bạn đã đạt giới hạn tải lên tối đa là 5 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên không giới hạn!' });
+      }
+    }
 
     const filePath = req.file.path;
     const fileUrl = `/uploads/${req.file.filename}`;
@@ -23,16 +44,19 @@ const uploadDocument = async (req, res) => {
     // 1. Extract content OCR
     const content = await extractTextFromFile(filePath, req.file.mimetype);
 
-    // 2. AI Metadata
-    const metadata = await extractMetadata(content);
-
-    // 3. Document Embeddings
-    // Supabase pgvector uses string representation of arrays like '[1.2, 0.5, ...]'
-    const rawEmbedding = await createEmbedding(content);
+    // 2. AI Metadata & Embeddings (run in parallel)
+    const [metadata, rawEmbedding] = await Promise.all([
+      extractMetadata(content),
+      createEmbedding(content)
+    ]);
+    const summary = metadata.summary || '';
     const embedding = JSON.stringify(rawEmbedding);
 
-    // Determine subject: if no subject is sent, try AI. If AI fails, use 'Khác'
-    let subjectVal = req.body.subject || metadata.subject || 'Khác';
+    // Determine subject: if no subject is sent or is 'Auto', try AI. If AI fails, use 'Khác'
+    let subjectVal = req.body.subject;
+    if (!subjectVal || subjectVal.trim().toLowerCase() === 'auto') {
+      subjectVal = metadata.subject || 'Khác';
+    }
     const normalizedSub = subjectVal.trim().toLowerCase();
     if (normalizedSub === 'auto' || normalizedSub === 'general' || normalizedSub === 'unknown' || !subjectVal.trim()) {
       subjectVal = 'Khác';
@@ -48,6 +72,7 @@ const uploadDocument = async (req, res) => {
         subject: subjectVal,
         file_url: fileUrl,
         embedding: embedding,
+        summary: summary || '',
         user_id: req.user.id,
         folder_id: req.body.folder_id || null
       }])
