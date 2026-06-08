@@ -1,5 +1,5 @@
 const supabase = require('../config/supabaseClient');
-const { summarizeDocument, answerQuestion, extractMetadata, generateQuiz } = require('../services/aiService');
+const { summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, extractMetadata, generateQuiz } = require('../services/aiService');
 const { isUserPro } = require('./userController');
 
 const triggerSummarize = async (req, res) => {
@@ -43,10 +43,24 @@ const triggerQnA = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const answer = await answerQuestion(doc.content, question);
-    res.status(200).json({ answer });
+    // Set streaming headers
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Run streaming content generation
+    await answerQuestionStream(doc.content, question, (chunk) => {
+      res.write(chunk);
+    });
+    res.end();
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (res.headersSent) {
+      res.write(`\n[ERROR]: ${error.message}`);
+      res.end();
+    } else {
+      res.status(500).json({ error: error.message });
+    }
   }
 };
 
@@ -55,15 +69,37 @@ const triggerChat = async (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ error: 'Message cannot be empty' });
     
-    // In a real scenario, you'd feed this message + history to OpenAI.
-    // For now, we mock the delay and response.
-    const mockResponse = `Tôi đã nhận được yêu cầu "${message}".\nHệ thống đang lọc các tài liệu có liên đới thuộc cơ sở dữ liệu của bạn, bao gồm các chính sách Nhân sự và Luật pháp.\n\nCó tài liệu nào cụ thể mảng này bạn muốn tôi đào sâu không?`;
-    
-    setTimeout(() => {
-      res.status(200).json({ answer: mockResponse });
-    }, 1500); // Simulate API latency
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const genAIObj = apiKey ? new (require('@google/generative-ai').GoogleGenerativeAI)(apiKey) : null;
+    const useMockVal = !genAIObj;
+
+    if (!useMockVal) {
+      const model = genAIObj.getGenerativeModel({ model: 'gemini-flash-latest' });
+      const result = await generateContentStreamWithRetry(model, message);
+      for await (const chunk of result.stream) {
+        res.write(chunk.text());
+      }
+    } else {
+      const mockResponse = `Tôi đã nhận được yêu cầu "${message}".\nHệ thống đang lọc các tài liệu có liên đới thuộc cơ sở dữ liệu của bạn, bao gồm các chính sách Nhân sự và Luật pháp.\n\nCó tài liệu nào cụ thể mảng này bạn muốn tôi đào sâu không?`;
+      const words = mockResponse.split(' ');
+      for (const word of words) {
+        res.write(word + ' ');
+        await new Promise(r => setTimeout(r, 60));
+      }
+    }
+    res.end();
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (res.headersSent) {
+      res.write(`\n[ERROR]: ${error.message}`);
+      res.end();
+    } else {
+      res.status(500).json({ error: error.message });
+    }
   }
 };
 
@@ -115,8 +151,17 @@ const triggerFolderChat = async (req, res) => {
       .eq('is_deleted', false);
 
     if (docsErr) throw docsErr;
+    
+    // Set streaming headers
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
     if (!docs || docs.length === 0) {
-      return res.status(200).json({ answer: 'Không tìm thấy tài liệu nào trong thư mục này để phân tích.' });
+      res.write('Không tìm thấy tài liệu nào trong thư mục này để phân tích.');
+      res.end();
+      return;
     }
 
     // 3. Concatenate content
@@ -125,11 +170,18 @@ const triggerFolderChat = async (req, res) => {
       aggregatedContext += `--- Tài liệu ${idx + 1}: ${doc.title} ---\nNội dung:\n${doc.content || ''}\n\n`;
     });
 
-    // 4. Call answerQuestion
-    const answer = await answerQuestion(aggregatedContext, question);
-    res.status(200).json({ answer });
+    // 4. Call answerQuestionStream
+    await answerQuestionStream(aggregatedContext, question, (chunk) => {
+      res.write(chunk);
+    });
+    res.end();
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    if (res.headersSent) {
+      res.write(`\n[ERROR]: ${error.message}`);
+      res.end();
+    } else {
+      res.status(500).json({ error: error.message });
+    }
   }
 };
 

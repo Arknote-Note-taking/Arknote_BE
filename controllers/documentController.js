@@ -44,35 +44,27 @@ const uploadDocument = async (req, res) => {
     // 1. Extract content OCR
     const content = await extractTextFromFile(filePath, req.file.mimetype);
 
-    // 2. AI Metadata & Embeddings (run in parallel)
-    const [metadata, rawEmbedding] = await Promise.all([
-      extractMetadata(content),
-      createEmbedding(content)
-    ]);
-    const summary = metadata.summary || '';
-    const embedding = JSON.stringify(rawEmbedding);
-
-    // Determine subject: if no subject is sent or is 'Auto', try AI. If AI fails, use 'Khác'
+    // Determine temporary subject if 'Auto' is selected
     let subjectVal = req.body.subject;
     if (!subjectVal || subjectVal.trim().toLowerCase() === 'auto') {
-      subjectVal = metadata.subject || 'Khác';
+      subjectVal = 'Đang phân tích...';
     }
     const normalizedSub = subjectVal.trim().toLowerCase();
-    if (normalizedSub === 'auto' || normalizedSub === 'general' || normalizedSub === 'unknown' || !subjectVal.trim()) {
+    if (normalizedSub === 'general' || normalizedSub === 'unknown' || !subjectVal.trim()) {
       subjectVal = 'Khác';
     }
 
-    // 4. Save to DB
+    // 2. Save document to DB immediately (without waiting for AI)
     const { data: doc, error } = await supabase
       .from('documents')
       .insert([{
         title: originalName,
         content,
-        tags: metadata.tags || [],
+        tags: ['Đang phân tích...'],
         subject: subjectVal,
         file_url: fileUrl,
-        embedding: embedding,
-        summary: summary || '',
+        embedding: null,
+        summary: 'Đang tóm tắt bằng AI...',
         user_id: req.user.id,
         folder_id: req.body.folder_id || null
       }])
@@ -84,10 +76,79 @@ const uploadDocument = async (req, res) => {
     // Add backward compatibility _id
     const responseDoc = { ...doc, _id: doc.id };
 
-    // 5. Emit socket globally
+    // 3. Emit socket for document creation and respond 201 immediately
     req.io.emit('document_created', responseDoc);
-
     res.status(201).json(responseDoc);
+
+    // 4. Run AI processing in the background asynchronously
+    (async () => {
+      try {
+        console.log(`[AI-Background] Starting metadata & embedding extraction for document: ${doc.id}`);
+        
+        // Execute Gemini metadata extraction & Embedding creation in parallel
+        const [metadata, rawEmbedding] = await Promise.all([
+          extractMetadata(content),
+          createEmbedding(content)
+        ]);
+
+        const summaryVal = metadata.summary || 'Không có bản tóm tắt.';
+        const embeddingVal = JSON.stringify(rawEmbedding);
+        const tagsVal = metadata.tags || [];
+
+        // Finalize subject if it was set to 'Auto'
+        let finalSubject = req.body.subject;
+        if (!finalSubject || finalSubject.trim().toLowerCase() === 'auto') {
+          finalSubject = metadata.subject || 'Khác';
+        }
+        const normalizedFinalSub = finalSubject.trim().toLowerCase();
+        if (normalizedFinalSub === 'auto' || normalizedFinalSub === 'general' || normalizedFinalSub === 'unknown' || !finalSubject.trim()) {
+          finalSubject = 'Khác';
+        }
+
+        // Update document with AI details in Supabase
+        const { data: updatedDoc, error: updateErr } = await supabase
+          .from('documents')
+          .update({
+            tags: tagsVal,
+            subject: finalSubject,
+            embedding: embeddingVal,
+            summary: summaryVal
+          })
+          .eq('id', doc.id)
+          .select()
+          .single();
+
+        if (updateErr) throw updateErr;
+
+        console.log(`[AI-Background] Successfully completed AI processing for document: ${doc.id}`);
+
+        // Emit document_updated event to all clients to refresh UI in real-time
+        const responseUpdatedDoc = { ...updatedDoc, _id: updatedDoc.id };
+        req.io.emit('document_updated', responseUpdatedDoc);
+      } catch (bgError) {
+        console.error(`[AI-Background] Error in background AI processing for ${doc.id}:`, bgError);
+        
+        // Gracefully set tags/summary to indicate failure instead of keeping loading state
+        try {
+          const { data: failedDoc } = await supabase
+            .from('documents')
+            .update({
+              tags: ['Thất bại'],
+              summary: 'Không thể tóm tắt tài liệu do sự cố kết nối AI.',
+              subject: req.body.subject && req.body.subject.trim().toLowerCase() !== 'auto' ? req.body.subject : 'Khác'
+            })
+            .eq('id', doc.id)
+            .select()
+            .single();
+
+          if (failedDoc) {
+            req.io.emit('document_updated', { ...failedDoc, _id: failedDoc.id });
+          }
+        } catch (dbErr) {
+          console.error('[AI-Background] Failed to write fallback state to DB:', dbErr);
+        }
+      }
+    })();
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

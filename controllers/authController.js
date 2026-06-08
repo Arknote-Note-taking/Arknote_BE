@@ -1,5 +1,24 @@
 const supabase = require('../config/supabaseClient');
 const nodemailer = require('nodemailer');
+const jwt = require('jsonwebtoken');
+
+const getCustomToken = (id, email) => {
+  return jwt.sign(
+    { id, email },
+    process.env.JWT_SECRET || 'ai-tagging-secret-key-123!'
+  );
+};
+
+const getUserFromToken = async (token) => {
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'ai-tagging-secret-key-123!');
+    return { id: decoded.id, email: decoded.email };
+  } catch (jwtErr) {
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+    if (authError || !user) throw Error('Invalid token');
+    return { id: user.id, email: user.email };
+  }
+};
 
 const registerUser = async (req, res) => {
   const { name, email, password } = req.body;
@@ -41,7 +60,7 @@ const registerUser = async (req, res) => {
       id: userData.id, 
       name, 
       email, 
-      token: authData.session?.access_token || 'check-email', 
+      token: authData.session ? getCustomToken(userData.id, userData.email) : 'check-email', 
       role: userData.role 
     });
   } catch (error) {
@@ -81,7 +100,7 @@ const loginUser = async (req, res) => {
       id: userData.id, 
       name: userData.name, 
       email, 
-      token: authData.session.access_token, 
+      token: getCustomToken(userData.id, userData.email), 
       role: userData.role,
       avatar_url: userData.avatar_url
     });
@@ -244,7 +263,7 @@ const googleLogin = async (req, res) => {
         id: user.id, 
         name, 
         email: user.email, 
-        token: access_token, 
+        token: getCustomToken(user.id, user.email), 
         role: 'user',
         avatar_url,
         needsPassword: true
@@ -256,7 +275,7 @@ const googleLogin = async (req, res) => {
       id: userData.id, 
       name: userData.name, 
       email: userData.email, 
-      token: access_token, 
+      token: getCustomToken(userData.id, userData.email), 
       role: userData.role,
       avatar_url: userData.avatar_url,
       needsPassword: !userData.has_password
@@ -276,8 +295,7 @@ const setPassword = async (req, res) => {
     if (!authorization) throw Error('Authorization token required');
     const token = authorization.split(' ')[1];
     
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    if (authError || !user) throw Error('Invalid token');
+    const user = await getUserFromToken(token);
 
     if (!newPassword || newPassword.length < 6) {
       throw Error('Password must be at least 6 characters');
@@ -324,7 +342,7 @@ const setPassword = async (req, res) => {
 
     res.status(200).json({ 
       message: 'Password set successfully',
-      token: authData.session.access_token
+      token: getCustomToken(user.id, user.email)
     });
   } catch (error) {
     console.error('Set Password Error:', error.message);
