@@ -1,4 +1,5 @@
 const supabase = require('../config/supabaseClient');
+const jwt = require('jsonwebtoken');
 
 const requireAuth = async (req, res, next) => {
   const { authorization } = req.headers;
@@ -10,17 +11,22 @@ const requireAuth = async (req, res, next) => {
   const token = authorization.split(' ')[1];
 
   try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    
-    if (error || !user) {
-      console.error('requireAuth Error: auth.getUser failed', error);
-      return res.status(401).json({ error: 'Request is not authorized' });
+    let userId;
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'ai-tagging-secret-key-123!');
+      userId = decoded.id;
+    } catch (jwtErr) {
+      const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+      if (authError || !user) {
+        throw new Error(authError?.message || 'Invalid token');
+      }
+      userId = user.id;
     }
 
     const { data: dbUser, error: dbError } = await supabase
       .from('users')
       .select('id, role, email')
-      .eq('id', user.id)
+      .eq('id', userId)
       .single();
 
     if (dbError || !dbUser) {

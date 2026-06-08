@@ -19,8 +19,68 @@ const generateWithRetry = async (model, prompt, maxRetries = 3) => {
                             err.message.includes('Service Unavailable')
                           ));
       if (isTransient && i < maxRetries - 1) {
-        console.warn(`Transient Gemini error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        let currentDelay = delay;
+        
+        // Parse Google API rate limit retry delay if present in errorDetails
+        if (err.errorDetails && Array.isArray(err.errorDetails)) {
+          const retryInfo = err.errorDetails.find(
+            detail => detail['@type'] && detail['@type'].includes('RetryInfo')
+          );
+          if (retryInfo && retryInfo.retryDelay) {
+            const seconds = parseFloat(retryInfo.retryDelay);
+            if (!isNaN(seconds)) {
+              // Add 1s safety buffer to ensure rate-limit window resets completely
+              currentDelay = Math.round((seconds + 1) * 1000);
+              console.log(`[Gemini-RateLimit] Detected Google API RetryInfo: Waiting ${seconds}s before retrying...`);
+            }
+          }
+        }
+        
+        console.warn(`Transient Gemini error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying in ${currentDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        
+        // Update exponential backoff delay for subsequent retries if no RetryInfo is sent next time
+        delay *= 2;
+      } else {
+        throw err;
+      }
+    }
+  }
+};
+
+const generateContentStreamWithRetry = async (model, prompt, maxRetries = 3) => {
+  let delay = 1000;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await model.generateContentStream(prompt);
+    } catch (err) {
+      const isTransient = err.status === 503 || err.status === 429 || 
+                          (err.message && (
+                            err.message.includes('503') || 
+                            err.message.includes('429') || 
+                            err.message.includes('high demand') || 
+                            err.message.includes('overloaded') ||
+                            err.message.includes('Service Unavailable')
+                          ));
+      if (isTransient && i < maxRetries - 1) {
+        let currentDelay = delay;
+        
+        // Parse Google API rate limit retry delay if present in errorDetails
+        if (err.errorDetails && Array.isArray(err.errorDetails)) {
+          const retryInfo = err.errorDetails.find(
+            detail => detail['@type'] && detail['@type'].includes('RetryInfo')
+          );
+          if (retryInfo && retryInfo.retryDelay) {
+            const seconds = parseFloat(retryInfo.retryDelay);
+            if (!isNaN(seconds)) {
+              currentDelay = Math.round((seconds + 1) * 1000);
+              console.log(`[Gemini-RateLimit] Detected Google Stream API RetryInfo: Waiting ${seconds}s before retrying stream...`);
+            }
+          }
+        }
+        
+        console.warn(`Transient Gemini Stream error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying stream in ${currentDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
         delay *= 2;
       } else {
         throw err;
@@ -178,4 +238,38 @@ Tài liệu:\n\n${text.substring(0, 8000)}`;
   }
 };
 
-module.exports = { extractMetadata, summarizeDocument, answerQuestion, generateQuiz };
+const answerQuestionStream = async (text, question, onChunk) => {
+  if (useMock) {
+    const mockResponse = "Đây là câu trả lời giả lập. Vui lòng cấu hình GEMINI_API_KEY để AI phân tích tài liệu và trả lời thực tế câu hỏi của bạn.";
+    const words = mockResponse.split(' ');
+    for (const word of words) {
+      onChunk(word + ' ');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return;
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
+    const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
+
+Ngữ cảnh tài liệu:
+${text.substring(0, 10000)}
+
+Câu hỏi: ${question}`;
+
+    const result = await generateContentStreamWithRetry(model, prompt);
+    for await (const chunk of result.stream) {
+      const chunkText = chunk.text();
+      if (chunkText) {
+        onChunk(chunkText);
+      }
+    }
+  } catch (err) {
+    console.error('Error in Gemini answerQuestionStream:', err);
+    throw err;
+  }
+};
+
+module.exports = { extractMetadata, summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, generateQuiz };
+

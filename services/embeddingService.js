@@ -30,8 +30,24 @@ const createEmbedding = async (text) => {
                             err.message.includes('Service Unavailable')
                           ));
       if (isTransient && i < maxRetries - 1) {
-        console.warn(`Transient Gemini Embedding error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        let currentDelay = delay;
+        
+        // Parse Google API rate limit retry delay if present in errorDetails
+        if (err.errorDetails && Array.isArray(err.errorDetails)) {
+          const retryInfo = err.errorDetails.find(
+            detail => detail['@type'] && detail['@type'].includes('RetryInfo')
+          );
+          if (retryInfo && retryInfo.retryDelay) {
+            const seconds = parseFloat(retryInfo.retryDelay);
+            if (!isNaN(seconds)) {
+              currentDelay = Math.round((seconds + 1) * 1000);
+              console.log(`[Gemini-RateLimit] Detected Google Embedding API RetryInfo: Waiting ${seconds}s before retrying...`);
+            }
+          }
+        }
+        
+        console.warn(`Transient Gemini Embedding error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying in ${currentDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
         delay *= 2;
       } else {
         console.error('Error in Gemini createEmbedding:', err);
