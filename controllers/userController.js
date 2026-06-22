@@ -190,6 +190,7 @@ module.exports = {
   updateProfile,
   uploadAvatar,
   upgradeToPro,
-  isUserPro
+  isUserPro,
+  setUserPro
 };
 
