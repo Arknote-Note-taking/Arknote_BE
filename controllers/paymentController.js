@@ -63,15 +63,22 @@ const createPaymentLink = async (req, res) => {
     const userId = req.user.id;
     const orderCode = Date.now();
 
-    // Determine frontend url for redirect
-    const frontendUrl = process.env.CORS_ORIGIN && process.env.CORS_ORIGIN !== '*'
-      ? process.env.CORS_ORIGIN.split(',')[0].trim()
-      : 'http://localhost:5173';
+    // Determine frontend url for redirect (prioritize FRONTEND_URL env)
+    const frontendUrl = process.env.FRONTEND_URL ||
+      (process.env.CORS_ORIGIN && process.env.CORS_ORIGIN !== '*'
+        ? process.env.CORS_ORIGIN.split(',')[0].trim()
+        : 'http://localhost:5173');
+
+    // Support custom amount from request body, fallback to PRO_PLAN_PRICE or 79000
+    // PayOS requires minimum amount of 1000 VND
+    const bodyAmount = req.body.amount ? Number(req.body.amount) : null;
+    const envPrice = process.env.PRO_PLAN_PRICE ? Number(process.env.PRO_PLAN_PRICE) : 79000;
+    const finalAmount = bodyAmount && bodyAmount >= 1000 ? bodyAmount : envPrice;
 
     let checkoutUrl = '';
 
     if (isMock) {
-      console.log(`[MOCK PAYMENT] Creating mock checkout for order ${orderCode}`);
+      console.log(`[MOCK PAYMENT] Creating mock checkout for order ${orderCode} with amount ${finalAmount}`);
       checkoutUrl = `${frontendUrl}/payment-success?code=00&status=PAID&orderCode=${orderCode}`;
     } else {
       if (!payos) {
@@ -80,12 +87,9 @@ const createPaymentLink = async (req, res) => {
         });
       }
 
-      // Check if price is customized. Default is 79,000 VND
-      const proPlanPrice = process.env.PRO_PLAN_PRICE ? Number(process.env.PRO_PLAN_PRICE) : 79000;
-
       const paymentLinkData = {
         orderCode: orderCode,
-        amount: proPlanPrice,
+        amount: finalAmount,
         description: `Nang cap Pro ${orderCode.toString().slice(-4)}`,
         cancelUrl: `${frontendUrl}/payment-cancel`,
         returnUrl: `${frontendUrl}/payment-success`,
@@ -93,7 +97,7 @@ const createPaymentLink = async (req, res) => {
           {
             name: 'Gói Chuyên Nghiệp (Pro) 1 Tháng',
             quantity: 1,
-            price: proPlanPrice
+            price: finalAmount
           }
         ]
       };
@@ -107,7 +111,7 @@ const createPaymentLink = async (req, res) => {
     payments[orderCode] = {
       userId: userId,
       status: 'pending',
-      amount: process.env.PRO_PLAN_PRICE ? Number(process.env.PRO_PLAN_PRICE) : 79000,
+      amount: finalAmount,
       paymentLinkId: isMock ? 'mock_link_id' : '',
       createdAt: new Date().toISOString()
     };
