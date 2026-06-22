@@ -71,7 +71,7 @@ const createPaymentLink = async (req, res) => {
 
     // Support custom amount from request body, fallback to PRO_PLAN_PRICE or 79000
     // PayOS requires minimum amount of 1000 VND
-    const bodyAmount = req.body.amount ? Number(req.body.amount) : null;
+    const bodyAmount = (req.body && req.body.amount) ? Number(req.body.amount) : null;
     const envPrice = process.env.PRO_PLAN_PRICE ? Number(process.env.PRO_PLAN_PRICE) : 79000;
     const finalAmount = bodyAmount && bodyAmount >= 1000 ? bodyAmount : envPrice;
 
