@@ -101,7 +101,7 @@ const extractMetadata = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-flash-latest',
+      model: 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -150,7 +150,7 @@ const summarizeDocument = async (text) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const prompt = `Tóm tắt tài liệu sau thành các ý chính ngắn gọn dưới dạng gạch đầu dòng bằng tiếng Việt:\n\n${text.substring(0, 8000)}`;
     
     const result = await generateWithRetry(model, prompt);
@@ -167,7 +167,7 @@ const answerQuestion = async (text, question) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
 
 Ngữ cảnh tài liệu:
@@ -203,7 +203,7 @@ const generateQuiz = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-flash-latest',
+      model: 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -250,7 +250,7 @@ const answerQuestionStream = async (text, question, onChunk) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
 
 Ngữ cảnh tài liệu:

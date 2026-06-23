@@ -79,7 +79,7 @@ const triggerChat = async (req, res) => {
     const useMockVal = !genAIObj;
 
     if (!useMockVal) {
-      const model = genAIObj.getGenerativeModel({ model: 'gemini-flash-latest' });
+      const model = genAIObj.getGenerativeModel({ model: 'gemini-2.5-flash' });
       const result = await generateContentStreamWithRetry(model, message);
       for await (const chunk of result.stream) {
         res.write(chunk.text());
