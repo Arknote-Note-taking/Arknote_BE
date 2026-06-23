@@ -11,7 +11,8 @@ const {
   deleteDocument,
   getDashboardStats,
   getDeletedDocuments,
-  restoreDocument
+  restoreDocument,
+  requestRestoreDocument
 } = require('../controllers/documentController');
 
 const {
@@ -41,6 +42,7 @@ router.post('/folders/:id/add-documents', addDocsToFolder);
 // Soft delete routes
 router.get('/deleted', getDeletedDocuments);
 router.post('/:id/restore', restoreDocument);
+router.post('/:id/request-restore', requestRestoreDocument);
 
 // Advanced features
 router.get('/search', searchDocuments);

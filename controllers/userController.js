@@ -51,16 +51,106 @@ const getUsers = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
     
-    const { data: users, error } = await supabase
+    let users, error;
+    const resUsers = await supabase
       .from('users')
-      .select('id, email, name, role, created_at')
+      .select('id, email, name, role, created_at, is_deleted')
+      .or('is_deleted.eq.false,is_deleted.is.null')
       .order('created_at', { ascending: false });
+
+    if (resUsers.error && resUsers.error.code === '42703') {
+      const fallbackUsers = await supabase
+        .from('users')
+        .select('id, email, name, role, created_at')
+        .order('created_at', { ascending: false });
+      users = fallbackUsers.data;
+      error = fallbackUsers.error;
+    } else {
+      users = resUsers.data;
+      error = resUsers.error;
+    }
 
     if (error) throw error;
     
     // Alias id to _id for FE and append is_pro
     const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: isUserPro(u.id) }));
     res.status(200).json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getDeletedUsers = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+    
+    let users, error;
+    const resUsers = await supabase
+      .from('users')
+      .select('id, email, name, role, created_at, is_deleted')
+      .eq('is_deleted', true)
+      .order('created_at', { ascending: false });
+
+    if (resUsers.error && resUsers.error.code === '42703') {
+      users = [];
+      error = null;
+    } else {
+      users = resUsers.data;
+      error = resUsers.error;
+    }
+
+    if (error) throw error;
+    
+    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: isUserPro(u.id) }));
+    res.status(200).json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const restoreUser = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const userId = req.params.id;
+
+    const { error: dbError } = await supabase
+      .from('users')
+      .update({ is_deleted: false })
+      .eq('id', userId);
+
+    if (dbError) throw dbError;
+
+    // Save & Emit notification to user
+    const { createNotification } = require('../services/notificationService');
+    await createNotification(req, {
+      recipientId: userId,
+      type: 'user_restored',
+      title: 'Tài khoản đã được khôi phục',
+      message: 'Tài khoản của bạn đã được khôi phục thành công!'
+    });
+
+    res.status(200).json({ message: 'Người dùng đã được khôi phục thành công.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const requestDeleteAccount = async (req, res) => {
+  try {
+    // Save & Emit notification to admin
+    const { createNotification } = require('../services/notificationService');
+    await createNotification(req, {
+      isForAdmin: true,
+      type: 'user_delete_request',
+      title: 'Yêu cầu xóa tài khoản',
+      message: `Người dùng: ${req.user.name || req.user.email} (${req.user.email})`
+    });
+    res.status(200).json({ message: 'Đã gửi yêu cầu xóa tài khoản tới Admin.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -78,31 +168,15 @@ const deleteUser = async (req, res) => {
       return res.status(400).json({ error: 'Trầm trọng: Không thể tự xóa chính mình.' });
     }
 
-    // 1. Cascade Delete: wipe out all their associated documents
-    await supabase.from('documents').delete().eq('user_id', userId);
-    
-    // 1.5. Clean up password_resets using the user's email
-    const { data: userToDelete } = await supabase.from('users').select('email').eq('id', userId).single();
-    if (userToDelete?.email) {
-      await supabase.from('password_resets').delete().eq('email', userToDelete.email);
-    }
+    // Soft delete: set is_deleted to true
+    const { error: dbError } = await supabase
+      .from('users')
+      .update({ is_deleted: true })
+      .eq('id', userId);
 
-    // 2. Delete from public.users table
-    const { error: dbError } = await supabase.from('users').delete().eq('id', userId);
     if (dbError) throw dbError;
 
-    // 3. Delete from Supabase Auth (Requires Service Role Key)
-    const { error: authError } = await supabase.auth.admin.deleteUser(userId);
-    if (authError) {
-      console.error('CRITICAL ERROR: Failed to delete user from Supabase Auth!');
-      console.error('Message:', authError.message);
-      console.error('ACTION REQUIRED: Ensure your SUPABASE_KEY in .env is the SERVICE ROLE KEY, not the anon key.');
-    }
-
-    // Clean up subscription locally too
-    setUserPro(userId, false);
-
-    res.status(200).json({ message: 'Người dùng và dữ liệu liên quan đã bị xóa vĩnh viễn.' });
+    res.status(200).json({ message: 'Người dùng đã được xóa tạm thời.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -112,7 +186,7 @@ const getProfile = async (req, res) => {
   try {
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, role, avatar_url, created_at')
+      .select('id, email, name, role, avatar_url, created_at, onboarding_completed')
       .eq('id', req.user.id)
       .single();
 
@@ -183,14 +257,48 @@ const upgradeToPro = async (req, res) => {
   }
 };
 
+const saveOnboardingSurvey = async (req, res) => {
+  const { answers } = req.body;
+  const userId = req.user.id;
+  try {
+    if (answers && typeof answers === 'object') {
+      const { error: surveyError } = await supabase
+        .from('onboarding_surveys')
+        .upsert({ user_id: userId, answers }, { onConflict: 'user_id' });
+
+      if (surveyError) {
+        console.error('Save onboarding survey error:', surveyError);
+      }
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .update({ onboarding_completed: true })
+      .eq('id', userId)
+      .select('id, email, name, role, avatar_url, created_at, onboarding_completed')
+      .single();
+
+    if (userError) throw userError;
+
+    res.status(200).json({ ...user, _id: user.id, is_pro: isUserPro(user.id) });
+  } catch (error) {
+    console.error('saveOnboardingSurvey error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getUsers,
+  getDeletedUsers,
+  restoreUser,
   deleteUser,
   getProfile,
   updateProfile,
   uploadAvatar,
   upgradeToPro,
   isUserPro,
-  setUserPro
+  setUserPro,
+  requestDeleteAccount,
+  saveOnboardingSurvey
 };
 
