@@ -217,4 +217,102 @@ const triggerQuiz = async (req, res) => {
   }
 };
 
-module.exports = { triggerSummarize, triggerQnA, triggerChat, triggerReanalyze, triggerFolderChat, triggerQuiz };
+const getChatHistories = async (req, res) => {
+  try {
+    const { data: chats, error } = await supabase
+      .from('chat_histories')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('updated_at', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json(chats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const createChatHistory = async (req, res) => {
+  const { title, context_doc_id, context_folder_id } = req.body;
+  try {
+    const defaultMessages = [
+      {
+        role: 'ai',
+        text: 'Xin chào! Tôi là AI trợ lý phân tích tài liệu. Bạn có thể:\n- Chọn hoặc tải lên tài liệu / thư mục để phân tích\n- Hỏi về nội dung tài liệu / thư mục\n- Yêu cầu tóm tắt nội dung\n- Tìm kiếm thông tin cốt lõi'
+      }
+    ];
+
+    const { data: chat, error } = await supabase
+      .from('chat_histories')
+      .insert([{
+        user_id: req.user.id,
+        title: title || 'Cuộc trò chuyện mới',
+        messages: JSON.stringify(defaultMessages),
+        context_doc_id: context_doc_id || null,
+        context_folder_id: context_folder_id || null
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(chat);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const updateChatHistory = async (req, res) => {
+  const { id } = req.params;
+  const { title, messages, context_doc_id, context_folder_id } = req.body;
+  try {
+    const updateData = { updated_at: new Date().toISOString() };
+    if (title !== undefined) updateData.title = title;
+    if (messages !== undefined) {
+      updateData.messages = typeof messages === 'string' ? messages : JSON.stringify(messages);
+    }
+    if (context_doc_id !== undefined) updateData.context_doc_id = context_doc_id;
+    if (context_folder_id !== undefined) updateData.context_folder_id = context_folder_id;
+
+    const { data: chat, error } = await supabase
+      .from('chat_histories')
+      .update(updateData)
+      .eq('id', id)
+      .eq('user_id', req.user.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(200).json(chat);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const deleteChatHistory = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { error } = await supabase
+      .from('chat_histories')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', req.user.id);
+
+    if (error) throw error;
+    res.status(200).json({ success: true, message: 'Deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { 
+  triggerSummarize, 
+  triggerQnA, 
+  triggerChat, 
+  triggerReanalyze, 
+  triggerFolderChat, 
+  triggerQuiz,
+  getChatHistories,
+  createChatHistory,
+  updateChatHistory,
+  deleteChatHistory
+};

@@ -10,8 +10,19 @@ const uploadDocument = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
-    // Limit check for non-pro users
+    // Enforce dynamic file size check based on user plan
     const userPro = isUserPro(req.user.id);
+    const sizeLimit = userPro || req.user.role === 'admin' ? 100 * 1024 * 1024 : 5 * 1024 * 1024; // 100MB vs 5MB
+    if (req.file.size > sizeLimit) {
+      if (req.file.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      return res.status(400).json({ 
+        error: `Kích thước tệp quá lớn (${(req.file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tệp tối đa của bạn là ${userPro || req.user.role === 'admin' ? '100MB' : '5MB'}. Vui lòng ${userPro || req.user.role === 'admin' ? 'nén tệp nhỏ hơn' : 'nâng cấp tài khoản PRO để tải lên tệp tối đa 100MB'}!` 
+      });
+    }
+
+    // Limit check for non-pro users
     if (!userPro && req.user.role !== 'admin') {
       const { count, error: countErr } = await supabase
         .from('documents')
@@ -156,7 +167,7 @@ const uploadDocument = async (req, res) => {
 
 const getDocuments = async (req, res) => {
   try {
-    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence').eq('is_deleted', false);
+    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, is_pinned').eq('is_deleted', false);
     
     if (req.user.role !== 'admin') {
       query = query.eq('user_id', req.user.id);
@@ -165,7 +176,22 @@ const getDocuments = async (req, res) => {
     const { data: docs, error } = await query;
     if (error) throw error;
     
-    const responseDocs = docs.map(d => ({ ...d, _id: d.id }));
+    let responseDocs = docs.map(d => ({ ...d, _id: d.id }));
+
+    // If admin, filter out duplicates by title
+    if (req.user.role === 'admin') {
+      const uniqueDocs = [];
+      const seenTitles = new Set();
+      responseDocs.forEach(doc => {
+        const normalizedTitle = doc.title?.toLowerCase().trim();
+        if (!seenTitles.has(normalizedTitle)) {
+          seenTitles.add(normalizedTitle);
+          uniqueDocs.push(doc);
+        }
+      });
+      responseDocs = uniqueDocs;
+    }
+
     res.status(200).json(responseDocs);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -179,7 +205,10 @@ const getDocumentById = async (req, res) => {
     if (!doc) return res.status(404).json({ error: 'Not found' });
     if (doc.is_deleted) return res.status(404).json({ error: 'Deleted' });
     
-    if (req.user.role !== 'admin' && doc.user_id !== req.user.id) {
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Admin chỉ quản lý tài liệu, không thể xem chi tiết nội dung tài liệu.' });
+    }
+    if (doc.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
     
@@ -236,13 +265,16 @@ const deleteDocument = async (req, res) => {
 
 const getDeletedDocuments = async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
-    }
-    const { data: docs, error } = await supabase
+    let query = supabase
       .from('documents')
       .select('id, title, summary, tags, subject, file_url, user_id, created_at')
       .eq('is_deleted', true);
+
+    if (req.user.role !== 'admin') {
+      query = query.eq('user_id', req.user.id);
+    }
+
+    const { data: docs, error } = await query;
     if (error) throw error;
     
     const { data: users, error: userErr } = await supabase.from('users').select('id, email');
@@ -251,11 +283,24 @@ const getDeletedDocuments = async (req, res) => {
       users.forEach(u => { userMap[u.id] = u.email; });
     }
     
-    const formatted = docs.map(d => ({ 
+    let formatted = docs.map(d => ({ 
       ...d, 
       _id: d.id,
       user_email: userMap[d.user_id] || 'Unknown' 
     }));
+
+    // Filter out duplicates by title
+    const uniqueDocs = [];
+    const seenTitles = new Set();
+    formatted.forEach(doc => {
+      const normalizedTitle = doc.title?.toLowerCase().trim();
+      if (!seenTitles.has(normalizedTitle)) {
+        seenTitles.add(normalizedTitle);
+        uniqueDocs.push(doc);
+      }
+    });
+    formatted = uniqueDocs;
+
     res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -264,9 +309,35 @@ const getDeletedDocuments = async (req, res) => {
 
 const restoreDocument = async (req, res) => {
   try {
+    console.log('[Restore-Debug] restoreDocument hit. User:', req.user?.email, 'Role:', req.user?.role);
     if (req.user.role !== 'admin') {
+      console.log('[Restore-Debug] Access forbidden: User role is not admin');
       return res.status(403).json({ error: 'Access forbidden' });
     }
+    // Retrieve doc to get title and owner user_id
+    const { data: docToCheck, error: checkError } = await supabase
+      .from('documents')
+      .select('id, title, user_id')
+      .eq('id', req.params.id)
+      .single();
+
+    if (checkError || !docToCheck) {
+      return res.status(404).json({ error: 'Không tìm thấy tài liệu.' });
+    }
+
+    // Check if there is an active document with the same title for the user
+    const { data: activeDocs, error: activeError } = await supabase
+      .from('documents')
+      .select('id')
+      .eq('user_id', docToCheck.user_id)
+      .eq('is_deleted', false)
+      .eq('title', docToCheck.title);
+
+    if (activeError) throw activeError;
+    if (activeDocs && activeDocs.length > 0) {
+      return res.status(400).json({ error: `Tài liệu "${docToCheck.title}" đã tồn tại trong danh sách tài liệu hoạt động của người dùng.` });
+    }
+
     const { data: doc, error } = await supabase
       .from('documents')
       .update({ is_deleted: false })
@@ -277,8 +348,64 @@ const restoreDocument = async (req, res) => {
     
     const responseDoc = { ...doc, _id: doc.id };
     req.io.emit('document_created', responseDoc);
+
+    // Save & Emit notification to user that their document has been restored
+    const { createNotification } = require('../services/notificationService');
+    await createNotification(req, {
+      recipientId: doc.user_id,
+      type: 'document_restored',
+      title: 'Tài liệu đã được khôi phục',
+      message: `Tài liệu "${doc.title}" của bạn đã được Admin khôi phục thành công!`,
+      docId: doc.id
+    });
+
     res.status(200).json(responseDoc);
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const requestRestoreDocument = async (req, res) => {
+  try {
+    console.log('[Socket-Debug] requestRestoreDocument called for ID:', req.params.id);
+    const { data: doc, error } = await supabase
+      .from('documents')
+      .select('id, title, user_id')
+      .eq('id', req.params.id)
+      .single();
+      
+    if (error || !doc) {
+      console.error('[Socket-Debug] Document not found:', error);
+      return res.status(404).json({ error: 'Không tìm thấy tài liệu.' });
+    }
+
+    // Check if there is an active document with the same title for the user
+    const { data: activeDocs, error: activeError } = await supabase
+      .from('documents')
+      .select('id')
+      .eq('user_id', doc.user_id)
+      .eq('is_deleted', false)
+      .eq('title', doc.title);
+
+    if (activeError) throw activeError;
+    if (activeDocs && activeDocs.length > 0) {
+      return res.status(400).json({ error: `Tài liệu "${doc.title}" đã tồn tại trong tài liệu hiện tại của bạn. Không cần khôi phục!` });
+    }
+
+    // Save & Emit notification to admin
+    console.log('[Socket-Debug] Emitting admin_notification for:', doc.title, 'from user:', req.user.email);
+    const { createNotification } = require('../services/notificationService');
+    await createNotification(req, {
+      isForAdmin: true,
+      type: 'document_restore_request',
+      title: 'Yêu cầu khôi phục tài liệu',
+      message: `Tài liệu: ${doc.title} (Yêu cầu từ: ${req.user.email})`,
+      docId: doc.id
+    });
+    
+    res.status(200).json({ message: 'Đã gửi yêu cầu khôi phục tài liệu tới Admin.' });
+  } catch (error) {
+    console.error('[Socket-Debug] requestRestoreDocument Exception:', error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -339,5 +466,6 @@ module.exports = {
   deleteDocument,
   getDashboardStats,
   getDeletedDocuments,
-  restoreDocument
+  restoreDocument,
+  requestRestoreDocument
 };

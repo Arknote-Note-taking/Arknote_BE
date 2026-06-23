@@ -11,6 +11,7 @@ const documentRoutes = require('./routes/documents');
 const aiRoutes = require('./routes/ai');
 const userRoutes = require('./routes/users');
 const paymentRoutes = require('./routes/payment');
+const notificationRoutes = require('./routes/notifications');
 
 const app = express();
 const server = http.createServer(app);
@@ -34,6 +35,7 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 app.use((req, res, next) => {
   req.io = io; // Inject socket.io instance into requests
   console.log(req.path, req.method);
@@ -46,6 +48,8 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/api/notifications', notificationRoutes);
+
 
 // Socket connection
 io.on('connection', (socket) => {
@@ -53,6 +57,21 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
   });
+});
+
+// Multer and general error handler middleware
+const multer = require('multer');
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'Kích thước tệp quá lớn. Giới hạn là 5MB đối với gói FREE, hoặc 100MB đối với gói PRO.' });
+    }
+    return res.status(400).json({ error: `Lỗi tải tệp: ${err.message}` });
+  }
+  if (err) {
+    return res.status(400).json({ error: err.message || 'Lỗi không xác định!' });
+  }
+  next();
 });
 
 // Database connection & Server Startup

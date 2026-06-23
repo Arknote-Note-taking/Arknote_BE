@@ -30,7 +30,11 @@ const extractWithMarkItDown = async (filePath) => {
 const extractTextFromFile = async (filePath, mimetype) => {
   try {
     const ext = path.extname(filePath).toLowerCase();
-    const markitdownSupportedExts = ['.pdf', '.docx', '.xlsx', '.pptx', '.htm', '.html', '.zip', '.json', '.xml', '.csv'];
+    const markitdownSupportedExts = [
+      '.pdf', '.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt', 
+      '.htm', '.html', '.zip', '.json', '.xml', '.csv',
+      '.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.m4a'
+    ];
 
     if (markitdownSupportedExts.includes(ext)) {
       try {
@@ -69,8 +73,13 @@ const extractTextFromFile = async (filePath, mimetype) => {
       const { data: { text } } = await Tesseract.recognize(filePath, 'eng');
       return text;
     } else {
-      // Fallback for txt or other raw text files
-      return fs.readFileSync(filePath, 'utf8');
+      // Safe fallback: only read as UTF-8 if the extension is text-friendly
+      const textFriendlyExts = ['.txt', '.html', '.htm', '.json', '.xml', '.md', '.csv'];
+      if (textFriendlyExts.includes(ext)) {
+        return fs.readFileSync(filePath, 'utf8');
+      }
+      // Return placeholder metadata for other binary files (excel, slide, video) so the chat has a reference
+      return `[Tài liệu: ${path.basename(filePath)} (định dạng ${ext})]`;
     }
   } catch (error) {
     console.error('File Extraction Error:', error);

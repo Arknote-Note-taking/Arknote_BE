@@ -1,6 +1,8 @@
 const supabase = require('../config/supabaseClient');
 const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
+const { isUserPro } = require('./userController');
+
 
 const getCustomToken = (id, email) => {
   return jwt.sign(
@@ -61,7 +63,9 @@ const registerUser = async (req, res) => {
       name, 
       email, 
       token: authData.session ? getCustomToken(userData.id, userData.email) : 'check-email', 
-      role: userData.role 
+      role: userData.role,
+      is_pro: isUserPro(userData.id),
+      onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
     console.error('Registration Catch Block:', error.message);
@@ -85,14 +89,29 @@ const loginUser = async (req, res) => {
     }
 
     // Fetch user details from public.users
-    const { data: userData, error: userError } = await supabase
+    let userData, userError;
+    const resUser = await supabase
       .from('users')
       .select('*')
       .eq('id', authData.user.id)
       .single();
 
-    if (userError || !userData) {
-      console.error('Supabase Public Table Fetch Error: User profile missing.');
+    if (resUser.error && resUser.error.code === '42703') {
+      const fallbackUser = await supabase
+        .from('users')
+        .select('id, name, email, role, avatar_url, has_password')
+        .eq('id', authData.user.id)
+        .single();
+      userData = fallbackUser.data;
+      userError = fallbackUser.error;
+      if (userData) userData.is_deleted = false;
+    } else {
+      userData = resUser.data;
+      userError = resUser.error;
+    }
+
+    if (userError || !userData || userData.is_deleted) {
+      console.error('Supabase Public Table Fetch Error: User profile missing or deleted.');
       return res.status(401).json({ error: 'Tài khoản của bạn đã bị vô hiệu hóa hoặc xóa khỏi hệ thống.' });
     }
 
@@ -102,7 +121,9 @@ const loginUser = async (req, res) => {
       email, 
       token: getCustomToken(userData.id, userData.email), 
       role: userData.role,
-      avatar_url: userData.avatar_url
+      avatar_url: userData.avatar_url,
+      is_pro: isUserPro(userData.id),
+      onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
     console.error('Login Catch Block:', error.message);
@@ -266,7 +287,9 @@ const googleLogin = async (req, res) => {
         token: getCustomToken(user.id, user.email), 
         role: 'user',
         avatar_url,
-        needsPassword: true
+        needsPassword: true,
+        is_pro: isUserPro(user.id),
+        onboarding_completed: false
       });
     }
 
@@ -278,7 +301,9 @@ const googleLogin = async (req, res) => {
       token: getCustomToken(userData.id, userData.email), 
       role: userData.role,
       avatar_url: userData.avatar_url,
-      needsPassword: !userData.has_password
+      needsPassword: !userData.has_password,
+      is_pro: isUserPro(userData.id),
+      onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
     console.error('Google Login Error:', error.message);
