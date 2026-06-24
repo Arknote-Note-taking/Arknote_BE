@@ -12,6 +12,7 @@ const aiRoutes = require('./routes/ai');
 const userRoutes = require('./routes/users');
 const paymentRoutes = require('./routes/payment');
 const notificationRoutes = require('./routes/notifications');
+const quizRoutes = require('./routes/quizzes');
 
 const app = express();
 const server = http.createServer(app);
@@ -46,6 +47,7 @@ app.use((req, res, next) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/quizzes', quizRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/notifications', notificationRoutes);

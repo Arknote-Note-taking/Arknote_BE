@@ -182,6 +182,39 @@ const deleteUser = async (req, res) => {
   }
 };
 
+const permanentDeleteUser = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const userId = req.params.id;
+
+    if (userId === req.user.id) {
+      return res.status(400).json({ error: 'Trầm trọng: Không thể tự xóa chính mình.' });
+    }
+
+    // Hard delete from users table
+    const { error: dbError } = await supabase
+      .from('users')
+      .delete()
+      .eq('id', userId);
+
+    if (dbError) throw dbError;
+
+    // Remove from subscriptions if present
+    try {
+      setUserPro(userId, false);
+    } catch (e) {
+      console.error('Error clearing subscription for deleted user:', e);
+    }
+
+    res.status(200).json({ message: 'Người dùng đã được xóa vĩnh viễn khỏi hệ thống.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 const getProfile = async (req, res) => {
   try {
     const { data: user, error } = await supabase
@@ -292,6 +325,7 @@ module.exports = {
   getDeletedUsers,
   restoreUser,
   deleteUser,
+  permanentDeleteUser,
   getProfile,
   updateProfile,
   uploadAvatar,

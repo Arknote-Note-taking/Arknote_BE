@@ -15,7 +15,8 @@ const triggerSummarize = async (req, res) => {
       return res.status(200).json({ summary: doc.summary }); // already summarized
     }
 
-    const summary = await summarizeDocument(doc.content);
+    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
+    const summary = await summarizeDocument(doc.content, isPro);
     
     const { data: updatedDoc, error: err2 } = await supabase
       .from('documents')
@@ -49,10 +50,11 @@ const triggerQnA = async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
     // Run streaming content generation
     await answerQuestionStream(doc.content, question, (chunk) => {
       res.write(chunk);
-    });
+    }, isPro);
     res.end();
   } catch (error) {
     if (res.headersSent) {
@@ -79,7 +81,7 @@ const triggerChat = async (req, res) => {
     const useMockVal = !genAIObj;
 
     if (!useMockVal) {
-      const model = genAIObj.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      const model = genAIObj.getGenerativeModel({ model: 'gemini-3-flash-preview' });
       const result = await generateContentStreamWithRetry(model, message);
       for await (const chunk of result.stream) {
         res.write(chunk.text());
@@ -113,7 +115,8 @@ const triggerReanalyze = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const metadata = await extractMetadata(doc.content);
+    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
+    const metadata = await extractMetadata(doc.content, isPro);
 
     res.status(200).json({
       title: metadata.title || doc.title,
@@ -170,10 +173,11 @@ const triggerFolderChat = async (req, res) => {
       aggregatedContext += `--- Tài liệu ${idx + 1}: ${doc.title} ---\nNội dung:\n${doc.content || ''}\n\n`;
     });
 
+    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
     // 4. Call answerQuestionStream
     await answerQuestionStream(aggregatedContext, question, (chunk) => {
       res.write(chunk);
-    });
+    }, isPro);
     res.end();
   } catch (error) {
     if (res.headersSent) {
@@ -187,7 +191,7 @@ const triggerFolderChat = async (req, res) => {
 
 const triggerQuiz = async (req, res) => {
   try {
-    const { documentId } = req.body;
+    const { documentId, count } = req.body;
     if (!documentId) return res.status(400).json({ error: 'Document ID is required' });
 
     // Check if user is Pro
@@ -210,8 +214,24 @@ const triggerQuiz = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const quiz = await generateQuiz(doc.content);
-    res.status(200).json({ quiz });
+    const isPro = userPro || req.user.role === 'admin';
+    const quizQuestions = await generateQuiz(doc.content, isPro, count ? parseInt(count, 10) : 5);
+
+    // Save quiz to Supabase
+    const { data: newQuiz, error: insertError } = await supabase
+      .from('quizzes')
+      .insert([{
+        user_id: req.user.id,
+        document_id: documentId,
+        title: `Quiz: ${doc.title}`,
+        questions: quizQuestions
+      }])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    res.status(200).json({ quiz: newQuiz });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
