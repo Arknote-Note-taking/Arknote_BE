@@ -4,7 +4,7 @@ const apiKey = process.env.GEMINI_API_KEY;
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 const useMock = !genAI;
 
-const generateWithRetry = async (model, prompt, maxRetries = 3) => {
+const generateWithRetry = async (model, prompt, maxRetries = 5) => {
   let delay = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -48,7 +48,7 @@ const generateWithRetry = async (model, prompt, maxRetries = 3) => {
   }
 };
 
-const generateContentStreamWithRetry = async (model, prompt, maxRetries = 3) => {
+const generateContentStreamWithRetry = async (model, prompt, maxRetries = 5) => {
   let delay = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -89,7 +89,7 @@ const generateContentStreamWithRetry = async (model, prompt, maxRetries = 3) => 
   }
 };
 
-const extractMetadata = async (text) => {
+const extractMetadata = async (text, isPro = false) => {
   if (useMock) {
     return {
       title: "Sample Document Title (Mocked)",
@@ -101,7 +101,7 @@ const extractMetadata = async (text) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -127,13 +127,15 @@ const extractMetadata = async (text) => {
             }
           },
           required: ['title', 'subject', 'tags', 'summary']
-        }
+        },
+        maxOutputTokens: 2048
       }
     });
 
+    const limit = isPro ? 80000 : 8000;
     const prompt = `Phân tích đoạn văn bản dưới đây và trích xuất thông tin theo cấu trúc JSON được yêu cầu.
 Văn bản:
-${text.substring(0, 8000)}`;
+${text.substring(0, limit)}`;
     
     const result = await generateWithRetry(model, prompt);
     const responseText = result.response.text();
@@ -144,14 +146,15 @@ ${text.substring(0, 8000)}`;
   }
 };
 
-const summarizeDocument = async (text) => {
+const summarizeDocument = async (text, isPro = false) => {
   if (useMock) {
     return "- Đây là bản tóm tắt giả lập.\n- Vui lòng cung cấp GEMINI_API_KEY trong file .env để sử dụng tóm tắt bằng Gemini AI thực tế.\n- Tài liệu của bạn đã được đọc thành công trong hệ thống.";
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const prompt = `Tóm tắt tài liệu sau thành các ý chính ngắn gọn dưới dạng gạch đầu dòng bằng tiếng Việt:\n\n${text.substring(0, 8000)}`;
+    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    const limit = isPro ? 80000 : 8000;
+    const prompt = `Tóm tắt tài liệu sau thành các ý chính ngắn gọn dưới dạng gạch đầu dòng bằng tiếng Việt:\n\n${text.substring(0, limit)}`;
     
     const result = await generateWithRetry(model, prompt);
     return result.response.text();
@@ -161,17 +164,18 @@ const summarizeDocument = async (text) => {
   }
 };
 
-const answerQuestion = async (text, question) => {
+const answerQuestion = async (text, question, isPro = false) => {
   if (useMock) {
     return "Đây là câu trả lời giả lập. Vui lòng cấu hình GEMINI_API_KEY để AI phân tích tài liệu và trả lời thực tế câu hỏi của bạn.";
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    const limit = isPro ? 100000 : 10000;
     const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
 
 Ngữ cảnh tài liệu:
-${text.substring(0, 10000)}
+${text.substring(0, limit)}
 
 Câu hỏi: ${question}`;
 
@@ -183,27 +187,30 @@ Câu hỏi: ${question}`;
   }
 };
 
-const generateQuiz = async (text) => {
+const generateQuiz = async (text, isPro = true, count = 5) => {
+  const questionCount = count || 5;
+
   if (useMock) {
-    return [
-      {
-        question: "Đây là câu hỏi trắc nghiệm giả lập 1 (Chưa cấu hình GEMINI_API_KEY)?",
-        options: ["Đáp án A", "Đáp án B", "Đáp án C", "Đáp án D"],
-        answer: "Đáp án A",
-        explanation: "Đây là đáp án đúng của câu hỏi giả lập."
-      },
-      {
-        question: "Chức năng Quiz hoạt động ở chế độ nào khi thiếu khóa API?",
-        options: ["Thử nghiệm giả lập", "Sử dụng Gemini thực tế", "Lỗi crash ứng dụng", "Không hiển thị"],
-        answer: "Thử nghiệm giả lập",
-        explanation: "Khi thiếu GEMINI_API_KEY, hệ thống kích hoạt fallback trả về bộ quiz mẫu để nhà phát triển xem trước giao diện."
-      }
-    ];
+    const mockQuizzes = [];
+    for (let i = 1; i <= questionCount; i++) {
+      mockQuizzes.push({
+        question: `Câu hỏi trắc nghiệm giả lập số ${i}: Trí tuệ nhân tạo hỗ trợ học tập như thế nào?`,
+        options: [
+          `A. Tự động hóa việc chấm điểm và tạo quiz ôn tập để nâng cao kiến thức học viên`,
+          `B. Thay thế hoàn toàn giáo viên đứng lớp`,
+          `C. Giảm dung lượng internet khi học trực tuyến`,
+          `D. Chỉ cung cấp tính năng trò chuyện giải trí tự động`
+        ],
+        answer: `A. Tự động hóa việc chấm điểm và tạo quiz ôn tập để nâng cao kiến thức học viên`,
+        explanation: `Đây là giải thích giả lập cho câu hỏi số ${i}. Trí tuệ nhân tạo (AI) giúp tạo ra các học liệu cá nhân hóa và các bài kiểm tra trắc nghiệm ôn tập (Quiz) từ tài liệu một cách tự động để người học rèn luyện kiến thức.`
+      });
+    }
+    return mockQuizzes;
   }
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -222,12 +229,14 @@ const generateQuiz = async (text) => {
             },
             required: ['question', 'options', 'answer', 'explanation']
           }
-        }
+        },
+        maxOutputTokens: 8192
       }
     });
 
-    const prompt = `Tạo một bộ câu hỏi trắc nghiệm (quiz) gồm 5 câu hỏi dựa trên nội dung tài liệu sau. Mỗi câu hỏi phải có 4 đáp án lựa chọn (A, B, C, D), chỉ rõ đáp án đúng và kèm giải thích chi tiết tại sao đúng bằng tiếng Việt.
-Tài liệu:\n\n${text.substring(0, 8000)}`;
+    const limit = isPro ? 80000 : 8000;
+    const prompt = `Tạo một bộ câu hỏi trắc nghiệm (quiz) gồm đúng ${questionCount} câu hỏi dựa trên nội dung tài liệu sau. Mỗi câu hỏi phải có 4 đáp án lựa chọn (A, B, C, D), chỉ rõ đáp án đúng và kèm giải thích chi tiết tại sao đúng bằng tiếng Việt.
+Tài liệu:\n\n${text.substring(0, limit)}`;
 
     const result = await generateWithRetry(model, prompt);
     const responseText = result.response.text();
@@ -238,7 +247,7 @@ Tài liệu:\n\n${text.substring(0, 8000)}`;
   }
 };
 
-const answerQuestionStream = async (text, question, onChunk) => {
+const answerQuestionStream = async (text, question, onChunk, isPro = false) => {
   if (useMock) {
     const mockResponse = "Đây là câu trả lời giả lập. Vui lòng cấu hình GEMINI_API_KEY để AI phân tích tài liệu và trả lời thực tế câu hỏi của bạn.";
     const words = mockResponse.split(' ');
@@ -250,11 +259,12 @@ const answerQuestionStream = async (text, question, onChunk) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    const limit = isPro ? 100000 : 10000;
     const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
 
 Ngữ cảnh tài liệu:
-${text.substring(0, 10000)}
+${text.substring(0, limit)}
 
 Câu hỏi: ${question}`;
 

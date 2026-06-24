@@ -96,9 +96,10 @@ const uploadDocument = async (req, res) => {
       try {
         console.log(`[AI-Background] Starting metadata & embedding extraction for document: ${doc.id}`);
         
+        const isPro = userPro || req.user.role === 'admin';
         // Execute Gemini metadata extraction & Embedding creation in parallel
         const [metadata, rawEmbedding] = await Promise.all([
-          extractMetadata(content),
+          extractMetadata(content, isPro),
           createEmbedding(content)
         ]);
 
