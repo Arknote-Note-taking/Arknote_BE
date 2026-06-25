@@ -11,7 +11,7 @@ const uploadDocument = async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     // Enforce dynamic file size check based on user plan
-    const userPro = isUserPro(req.user.id);
+    const userPro = await isUserPro(req.user.id);
     const sizeLimit = userPro || req.user.role === 'admin' ? 100 * 1024 * 1024 : 5 * 1024 * 1024; // 100MB vs 5MB
     if (req.file.size > sizeLimit) {
       if (req.file.path && fs.existsSync(req.file.path)) {
@@ -32,12 +32,12 @@ const uploadDocument = async (req, res) => {
 
       if (countErr) throw countErr;
 
-      if (count >= 5) {
+      if (count >= 50) {
         // Delete uploaded temp file to avoid junk in uploads folder
         if (req.file.path && fs.existsSync(req.file.path)) {
           fs.unlinkSync(req.file.path);
         }
-        return res.status(403).json({ error: 'Bạn đã đạt giới hạn tải lên tối đa là 5 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên không giới hạn!' });
+        return res.status(403).json({ error: 'Bạn đã đạt giới hạn tải lên tối đa là 50 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên không giới hạn!' });
       }
     }
 
@@ -168,15 +168,31 @@ const uploadDocument = async (req, res) => {
 
 const getDocuments = async (req, res) => {
   try {
-    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, is_pinned').eq('is_deleted', false);
+    let sharedFolderIds = [];
+    if (req.user.role !== 'admin') {
+      const { data: shares } = await supabase
+        .from('folder_shares')
+        .select('folder_id')
+        .eq('shared_to_email', req.user.email);
+      if (shares && shares.length > 0) {
+        sharedFolderIds = shares.map(s => s.folder_id).filter(id => id !== null);
+      }
+    }
+
+    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, is_pinned, folder_id').eq('is_deleted', false);
     
     if (req.user.role !== 'admin') {
-      query = query.eq('user_id', req.user.id);
+      if (sharedFolderIds.length > 0) {
+        query = query.or(`user_id.eq.${req.user.id},folder_id.in.(${sharedFolderIds.map(id => `"${id}"`).join(',')})`);
+      } else {
+        query = query.eq('user_id', req.user.id);
+      }
     }
     
     const { data: docs, error } = await query;
     if (error) throw error;
     
+    console.log(`[getDocuments] User: ${req.user.email}, Role: ${req.user.role}, Docs found in DB: ${docs ? docs.length : 0}`);
     let responseDocs = docs.map(d => ({ ...d, _id: d.id }));
 
     // If admin, filter out duplicates by title
@@ -209,7 +225,21 @@ const getDocumentById = async (req, res) => {
     if (req.user.role === 'admin') {
       return res.status(403).json({ error: 'Admin chỉ quản lý tài liệu, không thể xem chi tiết nội dung tài liệu.' });
     }
-    if (doc.user_id !== req.user.id) {
+    
+    let hasAccess = false;
+    if (doc.user_id === req.user.id) {
+      hasAccess = true;
+    } else if (doc.folder_id) {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', doc.folder_id)
+        .eq('shared_to_email', req.user.email)
+        .maybeSingle();
+      if (share) hasAccess = true;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
     
@@ -221,10 +251,24 @@ const getDocumentById = async (req, res) => {
 
 const updateDocument = async (req, res) => {
   try {
-    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, is_deleted').eq('id', req.params.id).single();
+    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, is_deleted, folder_id').eq('id', req.params.id).single();
     if (checkErr || !docCheck || docCheck.is_deleted) return res.status(404).json({ error: 'Not found' });
     
-    if (req.user.role !== 'admin' && docCheck.user_id !== req.user.id) {
+    let canUpdate = false;
+    if (docCheck.user_id === req.user.id || req.user.role === 'admin') {
+      canUpdate = true;
+    } else if (docCheck.folder_id) {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', docCheck.folder_id)
+        .eq('shared_to_email', req.user.email)
+        .eq('permission_role', 'editor')
+        .maybeSingle();
+      if (share) canUpdate = true;
+    }
+
+    if (!canUpdate) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
@@ -247,17 +291,34 @@ const updateDocument = async (req, res) => {
 
 const deleteDocument = async (req, res) => {
   try {
-    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id').eq('id', req.params.id).single();
+    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, title').eq('id', req.params.id).single();
     if (checkErr || !docCheck) return res.status(404).json({ error: 'Not found' });
     
     if (req.user.role !== 'admin' && docCheck.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const { error } = await supabase.from('documents').update({ is_deleted: true }).eq('id', req.params.id);
+    const { error } = await supabase.from('documents').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', req.params.id);
     if (error) throw error;
     
     req.io.emit('document_deleted', { id: req.params.id }); // Use standard id field
+    
+    // Notify user if admin deleted their document
+    if (req.user.role === 'admin' && docCheck.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        await createNotification(req, {
+          recipientId: docCheck.user_id,
+          type: 'document_deleted_by_admin',
+          title: 'Tài liệu bị xóa bởi Admin',
+          message: `Tài liệu "${docCheck.title}" của bạn đã bị Admin xóa.`,
+          docId: docCheck.id
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send document deletion notification:', notifErr);
+      }
+    }
+
     res.status(200).json({ message: 'Soft deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -341,7 +402,7 @@ const restoreDocument = async (req, res) => {
 
     const { data: doc, error } = await supabase
       .from('documents')
-      .update({ is_deleted: false })
+      .update({ is_deleted: false, deleted_at: null })
       .eq('id', req.params.id)
       .select()
       .single();
@@ -421,6 +482,8 @@ const getDashboardStats = async (req, res) => {
     
     const { data: allUserDocs, error } = await query;
     if (error) throw error;
+    
+    console.log(`[getDashboardStats] User: ${req.user.email}, Role: ${req.user.role}, Docs found: ${allUserDocs ? allUserDocs.length : 0}`);
     
     const totalDocs = allUserDocs.length;
     const processedDocs = allUserDocs.filter(d => d.summary && d.summary.trim() !== '').length;

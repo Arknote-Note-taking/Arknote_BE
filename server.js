@@ -13,6 +13,9 @@ const userRoutes = require('./routes/users');
 const paymentRoutes = require('./routes/payment');
 const notificationRoutes = require('./routes/notifications');
 const quizRoutes = require('./routes/quizzes');
+const flashcardRoutes = require('./routes/flashcards');
+const shareRoutes = require('./routes/shares');
+const annotationRoutes = require('./routes/annotations');
 
 const app = express();
 const server = http.createServer(app);
@@ -51,6 +54,9 @@ app.use('/api/quizzes', quizRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/flashcards', flashcardRoutes);
+app.use('/api/shares', shareRoutes);
+app.use('/api/annotations', annotationRoutes);
 
 
 // Socket connection
@@ -79,4 +85,8 @@ app.use((err, req, res, next) => {
 // Database connection & Server Startup
 server.listen(process.env.PORT, () => {
   console.log(`Server running on port ${process.env.PORT} - Connected to Supabase`);
+  
+  // Start automatic document cleanup background service
+  const { startCleanupInterval } = require('./services/cleanupService');
+  startCleanupInterval(io);
 });

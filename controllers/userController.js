@@ -1,48 +1,42 @@
 const supabase = require('../config/supabaseClient');
-const fs = require('fs');
-const path = require('path');
 
-const SUBS_FILE = path.join(__dirname, '../data/subscriptions.json');
-
-// Ensure subscriptions directory and file exist
-const initSubscriptionsFile = () => {
-  const dir = path.dirname(SUBS_FILE);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  if (!fs.existsSync(SUBS_FILE)) {
-    fs.writeFileSync(SUBS_FILE, JSON.stringify({}));
-  }
-};
-
-const getSubscriptions = () => {
-  initSubscriptionsFile();
+const isUserPro = async (userId) => {
   try {
-    const data = fs.readFileSync(SUBS_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (e) {
-    return {};
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('is_pro, pro_expires_at')
+      .eq('id', userId)
+      .single();
+    if (error || !user) return false;
+    
+    // Check if pro has expired
+    if (user.is_pro && user.pro_expires_at && new Date(user.pro_expires_at) < new Date()) {
+      // Auto downgrade in database
+      await supabase.from('users').update({ is_pro: false }).eq('id', userId);
+      return false;
+    }
+    
+    return !!user.is_pro;
+  } catch (err) {
+    console.error('Error checking isUserPro:', err);
+    return false;
   }
 };
 
-const saveSubscriptions = (subs) => {
-  initSubscriptionsFile();
-  fs.writeFileSync(SUBS_FILE, JSON.stringify(subs, null, 2));
-};
-
-const isUserPro = (userId) => {
-  const subs = getSubscriptions();
-  return !!subs[userId];
-};
-
-const setUserPro = (userId, status) => {
-  const subs = getSubscriptions();
-  if (status) {
-    subs[userId] = true;
-  } else {
-    delete subs[userId];
+const setUserPro = async (userId, status) => {
+  try {
+    const expiresAt = status ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() : null; // 30 days
+    await supabase
+      .from('users')
+      .update({ 
+        is_pro: status, 
+        pro_expires_at: expiresAt,
+        ai_credits_remaining: status ? 500 : 30 // Pro users get more daily credits
+      })
+      .eq('id', userId);
+  } catch (err) {
+    console.error('Error setting user pro:', err);
   }
-  saveSubscriptions(subs);
 };
 
 const getUsers = async (req, res) => {
@@ -54,14 +48,14 @@ const getUsers = async (req, res) => {
     let users, error;
     const resUsers = await supabase
       .from('users')
-      .select('id, email, name, role, created_at, is_deleted')
+      .select('id, email, name, role, created_at, is_deleted, is_pro, ai_credits_remaining')
       .or('is_deleted.eq.false,is_deleted.is.null')
       .order('created_at', { ascending: false });
 
     if (resUsers.error && resUsers.error.code === '42703') {
       const fallbackUsers = await supabase
         .from('users')
-        .select('id, email, name, role, created_at')
+        .select('id, email, name, role, created_at, is_pro, ai_credits_remaining')
         .order('created_at', { ascending: false });
       users = fallbackUsers.data;
       error = fallbackUsers.error;
@@ -72,8 +66,10 @@ const getUsers = async (req, res) => {
 
     if (error) throw error;
     
+    console.log(`[getUsers] Admin: ${req.user.email}, Users found in DB: ${users ? users.length : 0}`);
+    
     // Alias id to _id for FE and append is_pro
-    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: isUserPro(u.id) }));
+    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: !!u.is_pro }));
     res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -89,7 +85,7 @@ const getDeletedUsers = async (req, res) => {
     let users, error;
     const resUsers = await supabase
       .from('users')
-      .select('id, email, name, role, created_at, is_deleted')
+      .select('id, email, name, role, created_at, is_deleted, is_pro, ai_credits_remaining')
       .eq('is_deleted', true)
       .order('created_at', { ascending: false });
 
@@ -103,7 +99,7 @@ const getDeletedUsers = async (req, res) => {
 
     if (error) throw error;
     
-    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: isUserPro(u.id) }));
+    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: !!u.is_pro }));
     res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -219,13 +215,13 @@ const getProfile = async (req, res) => {
   try {
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, role, avatar_url, created_at, onboarding_completed')
+      .select('id, email, name, role, avatar_url, created_at, onboarding_completed, is_pro, ai_credits_remaining')
       .eq('id', req.user.id)
       .single();
 
     if (error || !user) throw Error('User profile not found');
     
-    res.status(200).json({ ...user, _id: user.id, is_pro: isUserPro(user.id) });
+    res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -240,12 +236,12 @@ const updateProfile = async (req, res) => {
       .from('users')
       .update({ name })
       .eq('id', req.user.id)
-      .select('id, email, name, role, avatar_url, created_at')
+      .select('id, email, name, role, avatar_url, created_at, is_pro, ai_credits_remaining')
       .single();
 
     if (error) throw error;
     
-    res.status(200).json({ ...user, _id: user.id, is_pro: isUserPro(user.id) });
+    res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -261,12 +257,12 @@ const uploadAvatar = async (req, res) => {
       .from('users')
       .update({ avatar_url: avatarUrl })
       .eq('id', req.user.id)
-      .select('id, email, name, role, avatar_url, created_at')
+      .select('id, email, name, role, avatar_url, created_at, is_pro, ai_credits_remaining')
       .single();
 
     if (error) throw error;
     
-    res.status(200).json({ ...user, _id: user.id, is_pro: isUserPro(user.id) });
+    res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -274,17 +270,17 @@ const uploadAvatar = async (req, res) => {
 
 const upgradeToPro = async (req, res) => {
   try {
-    setUserPro(req.user.id, true);
+    await setUserPro(req.user.id, true);
     
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, role, avatar_url, created_at')
+      .select('id, email, name, role, avatar_url, created_at, is_pro, ai_credits_remaining')
       .eq('id', req.user.id)
       .single();
 
     if (error || !user) throw Error('User profile not found');
     
-    res.status(200).json({ ...user, _id: user.id, is_pro: true });
+    res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -308,12 +304,12 @@ const saveOnboardingSurvey = async (req, res) => {
       .from('users')
       .update({ onboarding_completed: true })
       .eq('id', userId)
-      .select('id, email, name, role, avatar_url, created_at, onboarding_completed')
+      .select('id, email, name, role, avatar_url, created_at, onboarding_completed, is_pro, ai_credits_remaining')
       .single();
 
     if (userError) throw userError;
 
-    res.status(200).json({ ...user, _id: user.id, is_pro: isUserPro(user.id) });
+    res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     console.error('saveOnboardingSurvey error:', error.message);
     res.status(500).json({ error: error.message });

@@ -29,8 +29,11 @@ const registerUser = async (req, res) => {
 
     console.log(`Attempting to register user: ${email}`);
 
+    const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
     // Sign up via Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.signUp({
+    const { data: authData, error: authError } = await authClient.auth.signUp({
       email,
       password,
       options: {
@@ -64,7 +67,7 @@ const registerUser = async (req, res) => {
       email, 
       token: authData.session ? getCustomToken(userData.id, userData.email) : 'check-email', 
       role: userData.role,
-      is_pro: isUserPro(userData.id),
+      is_pro: await isUserPro(userData.id),
       onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
@@ -78,7 +81,10 @@ const loginUser = async (req, res) => {
   try {
     if (!email || !password) throw Error('All fields must be filled');
 
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+    const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    const { data: authData, error: authError } = await authClient.auth.signInWithPassword({
       email,
       password
     });
@@ -122,7 +128,7 @@ const loginUser = async (req, res) => {
       token: getCustomToken(userData.id, userData.email), 
       role: userData.role,
       avatar_url: userData.avatar_url,
-      is_pro: isUserPro(userData.id),
+      is_pro: await isUserPro(userData.id),
       onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
@@ -288,7 +294,7 @@ const googleLogin = async (req, res) => {
         role: 'user',
         avatar_url,
         needsPassword: true,
-        is_pro: isUserPro(user.id),
+        is_pro: await isUserPro(user.id),
         onboarding_completed: false
       });
     }
@@ -302,7 +308,7 @@ const googleLogin = async (req, res) => {
       role: userData.role,
       avatar_url: userData.avatar_url,
       needsPassword: !userData.has_password,
-      is_pro: isUserPro(userData.id),
+      is_pro: await isUserPro(userData.id),
       onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
@@ -355,7 +361,10 @@ const setPassword = async (req, res) => {
     }
 
     // 4. Re-authenticate to get a fresh token (because changing password revokes old tokens)
-    const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
+    const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    const { data: authData, error: signInError } = await authClient.auth.signInWithPassword({
       email: user.email,
       password: newPassword
     });

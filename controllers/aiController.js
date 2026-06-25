@@ -15,7 +15,7 @@ const triggerSummarize = async (req, res) => {
       return res.status(200).json({ summary: doc.summary }); // already summarized
     }
 
-    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
+    const isPro = (await isUserPro(req.user.id)) || req.user.role === 'admin';
     const summary = await summarizeDocument(doc.content, isPro);
     
     const { data: updatedDoc, error: err2 } = await supabase
@@ -50,7 +50,7 @@ const triggerQnA = async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
+    const isPro = (await isUserPro(req.user.id)) || req.user.role === 'admin';
     // Run streaming content generation
     await answerQuestionStream(doc.content, question, (chunk) => {
       res.write(chunk);
@@ -115,7 +115,7 @@ const triggerReanalyze = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
+    const isPro = (await isUserPro(req.user.id)) || req.user.role === 'admin';
     const metadata = await extractMetadata(doc.content, isPro);
 
     res.status(200).json({
@@ -173,7 +173,7 @@ const triggerFolderChat = async (req, res) => {
       aggregatedContext += `--- Tài liệu ${idx + 1}: ${doc.title} ---\nNội dung:\n${doc.content || ''}\n\n`;
     });
 
-    const isPro = isUserPro(req.user.id) || req.user.role === 'admin';
+    const isPro = (await isUserPro(req.user.id)) || req.user.role === 'admin';
     // 4. Call answerQuestionStream
     await answerQuestionStream(aggregatedContext, question, (chunk) => {
       res.write(chunk);
@@ -195,7 +195,7 @@ const triggerQuiz = async (req, res) => {
     if (!documentId) return res.status(400).json({ error: 'Document ID is required' });
 
     // Check if user is Pro
-    const userPro = isUserPro(req.user.id);
+    const userPro = await isUserPro(req.user.id);
     if (!userPro && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Tính năng tạo Quiz trắc nghiệm chỉ dành riêng cho tài khoản Pro. Vui lòng nâng cấp tài khoản!' });
     }
@@ -217,21 +217,57 @@ const triggerQuiz = async (req, res) => {
     const isPro = userPro || req.user.role === 'admin';
     const quizQuestions = await generateQuiz(doc.content, isPro, count ? parseInt(count, 10) : 5);
 
-    // Save quiz to Supabase
-    const { data: newQuiz, error: insertError } = await supabase
+    // Save quiz to Supabase (check if it already exists)
+    const quizTitle = `Quiz: ${doc.title}`;
+
+    const { data: existingQuizzes, error: selectErr } = await supabase
       .from('quizzes')
-      .insert([{
-        user_id: req.user.id,
-        document_id: documentId,
-        title: `Quiz: ${doc.title}`,
-        questions: quizQuestions
-      }])
-      .select()
-      .single();
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('document_id', documentId)
+      .eq('title', quizTitle);
 
-    if (insertError) throw insertError;
+    let targetQuiz = null;
 
-    res.status(200).json({ quiz: newQuiz });
+    if (existingQuizzes && existingQuizzes.length > 0) {
+      targetQuiz = existingQuizzes[0];
+      const { data: updatedQuiz, error: updateErr } = await supabase
+        .from('quizzes')
+        .update({
+          questions: quizQuestions
+        })
+        .eq('id', targetQuiz.id)
+        .select()
+        .single();
+
+      if (updateErr) throw updateErr;
+      targetQuiz = updatedQuiz;
+
+      // Delete any previous attempts for this quiz and user to reset progress
+      const { error: deleteErr } = await supabase
+        .from('quiz_attempts')
+        .delete()
+        .eq('quiz_id', targetQuiz.id)
+        .eq('user_id', req.user.id);
+
+      if (deleteErr) throw deleteErr;
+    } else {
+      const { data: newQuiz, error: insertError } = await supabase
+        .from('quizzes')
+        .insert([{
+          user_id: req.user.id,
+          document_id: documentId,
+          title: quizTitle,
+          questions: quizQuestions
+        }])
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+      targetQuiz = newQuiz;
+    }
+
+    res.status(200).json({ quiz: targetQuiz });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -80,7 +80,10 @@ const getAttempts = async (req, res) => {
 // Start a new attempt for a quiz
 const startAttempt = async (req, res) => {
   try {
-    const { quizId } = req.body;
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Admin không được phép làm bài Quiz.' });
+    }
+    const { quizId, forceNew } = req.body;
     if (!quizId) return res.status(400).json({ error: 'Quiz ID is required' });
 
     // Verify quiz exists and belongs to user
@@ -95,42 +98,32 @@ const startAttempt = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    // Check if there is already any attempt (completed or not) for this quiz and user
-    const { data: existing, error: existErr } = await supabase
-      .from('quiz_attempts')
-      .select('*')
-      .eq('quiz_id', quizId)
-      .eq('user_id', req.user.id)
-      .limit(1);
+    if (!forceNew) {
+      // Check trùng: check if there is an active (incomplete) attempt for this quiz and user
+      const { data: activeAttempts, error: attErr } = await supabase
+        .from('quiz_attempts')
+        .select('*')
+        .eq('quiz_id', quizId)
+        .eq('user_id', req.user.id)
+        .eq('is_completed', false)
+        .order('created_at', { ascending: false });
 
-    if (existing && existing.length > 0) {
-      const attemptToUse = existing[0];
-      if (attemptToUse.is_completed) {
-        // If it is already completed, reset it to start a fresh attempt!
-        const { data: updatedAttempt, error: updateErr } = await supabase
-          .from('quiz_attempts')
-          .update({
-            score: 0,
-            user_answers: {},
-            is_completed: false,
-            time_spent: 0,
-            current_question_index: 0,
-            completed_at: null,
-            created_at: new Date().toISOString()
-          })
-          .eq('id', attemptToUse.id)
-          .select()
-          .single();
-
-        if (updateErr) throw updateErr;
-        return res.status(200).json(updatedAttempt);
-      } else {
-        // If it is in-progress, resume the existing attempt as before
-        return res.status(200).json(attemptToUse);
+      if (activeAttempts && activeAttempts.length > 0) {
+        // Return existing active attempt to prevent duplicates
+        return res.status(200).json(activeAttempts[0]);
       }
     }
 
-    // Insert new attempt (if no previous attempts exist at all)
+    // Delete any old attempts for this quiz and user to keep only the newest one
+    const { error: deleteErr } = await supabase
+      .from('quiz_attempts')
+      .delete()
+      .eq('quiz_id', quizId)
+      .eq('user_id', req.user.id);
+
+    if (deleteErr) throw deleteErr;
+
+    // Insert new attempt (since no active attempt exists)
     const { data: attempt, error } = await supabase
       .from('quiz_attempts')
       .insert([{
@@ -290,6 +283,99 @@ const getQuizAttemptsForAdmin = async (req, res) => {
   }
 };
 
+// Delete a quiz (owner or admin)
+const deleteQuiz = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch quiz to check ownership
+    const { data: quiz, error: quizErr } = await supabase
+      .from('quizzes')
+      .select('id, title, user_id, document_id')
+      .eq('id', id)
+      .single();
+
+    if (quizErr || !quiz) return res.status(404).json({ error: 'Quiz không tồn tại' });
+    if (quiz.user_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const { error } = await supabase
+      .from('quizzes')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+
+    // Notify user if admin deleted their quiz
+    if (req.user.role === 'admin' && quiz.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        await createNotification(req, {
+          recipientId: quiz.user_id,
+          type: 'quiz_deleted_by_admin',
+          title: 'Quiz bị xóa bởi Admin',
+          message: `Bài ôn tập Quiz "${quiz.title}" của bạn đã bị Admin xóa.`,
+          docId: quiz.document_id || null
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send quiz deletion notification:', notifErr);
+      }
+    }
+
+    res.status(200).json({ message: 'Xóa bài Quiz thành công' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Delete a quiz attempt (owner or admin)
+const deleteAttempt = async (req, res) => {
+  try {
+    const { attemptId } = req.params;
+
+    // Check ownership
+    const { data: attempt, error: checkErr } = await supabase
+      .from('quiz_attempts')
+      .select('id, user_id, quiz:quizzes(title, document_id)')
+      .eq('id', attemptId)
+      .single();
+
+    if (checkErr || !attempt) return res.status(404).json({ error: 'Lượt làm bài không tồn tại' });
+    if (attempt.user_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    const { error } = await supabase
+      .from('quiz_attempts')
+      .delete()
+      .eq('id', attemptId);
+
+    if (error) throw error;
+
+    // Notify user if admin deleted their quiz attempt
+    if (req.user.role === 'admin' && attempt.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        const quizTitle = attempt.quiz?.title || 'Bài Quiz ôn tập';
+        await createNotification(req, {
+          recipientId: attempt.user_id,
+          type: 'attempt_deleted_by_admin',
+          title: 'Lịch sử làm bài bị xóa',
+          message: `Lịch sử làm bài của bài ôn tập "${quizTitle}" đã bị Admin xóa.`,
+          docId: attempt.quiz?.document_id || null
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send quiz attempt deletion notification:', notifErr);
+      }
+    }
+
+    res.status(200).json({ message: 'Xóa lịch sử làm bài thành công' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getQuizzes,
   getQuizById,
@@ -298,5 +384,7 @@ module.exports = {
   updateProgress,
   submitAttempt,
   getAttemptById,
-  getQuizAttemptsForAdmin
+  getQuizAttemptsForAdmin,
+  deleteQuiz,
+  deleteAttempt
 };

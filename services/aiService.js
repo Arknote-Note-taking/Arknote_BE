@@ -281,5 +281,52 @@ Câu hỏi: ${question}`;
   }
 };
 
-module.exports = { extractMetadata, summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, generateQuiz };
+const generateFlashcards = async (text, isPro = true, count = 10) => {
+  const cardCount = count || 10;
+
+  if (useMock) {
+    const mockFlashcards = [];
+    for (let i = 1; i <= cardCount; i++) {
+      mockFlashcards.push({
+        front_text: `Câu hỏi ôn tập (Flashcard) số ${i} từ tài liệu?`,
+        back_text: `Câu trả lời tương ứng số ${i} nhằm ghi nhớ kiến thức cốt lõi.`
+      });
+    }
+    return mockFlashcards;
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-3-flash-preview',
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              front_text: { type: 'string', description: 'Nội dung câu hỏi hoặc khái niệm ở mặt trước thẻ' },
+              back_text: { type: 'string', description: 'Câu trả lời hoặc giải nghĩa ngắn gọn ở mặt sau thẻ' }
+            },
+            required: ['front_text', 'back_text']
+          }
+        },
+        maxOutputTokens: 4096
+      }
+    });
+
+    const limit = isPro ? 80000 : 8000;
+    const prompt = `Tạo một bộ thẻ ghi nhớ (flashcard) gồm đúng ${cardCount} thẻ dựa trên nội dung tài liệu sau. Mỗi thẻ gồm mặt trước (front_text) là câu hỏi ngắn hoặc khái niệm, mặt sau (back_text) là câu trả lời ngắn gọn hoặc định nghĩa bằng tiếng Việt.
+Tài liệu:\n\n${text.substring(0, limit)}`;
+
+    const result = await generateWithRetry(model, prompt);
+    const responseText = result.response.text();
+    return JSON.parse(responseText);
+  } catch (err) {
+    console.error('Error in Gemini generateFlashcards:', err);
+    throw new Error('Không thể tự động tạo bộ flashcard từ tài liệu này.');
+  }
+};
+
+module.exports = { extractMetadata, summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, generateQuiz, generateFlashcards };
 
