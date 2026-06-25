@@ -80,6 +80,9 @@ const getAttempts = async (req, res) => {
 // Start a new attempt for a quiz
 const startAttempt = async (req, res) => {
   try {
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Admin không được phép làm bài Quiz.' });
+    }
     const { quizId, forceNew } = req.body;
     if (!quizId) return res.status(400).json({ error: 'Quiz ID is required' });
 
@@ -288,7 +291,7 @@ const deleteQuiz = async (req, res) => {
     // Fetch quiz to check ownership
     const { data: quiz, error: quizErr } = await supabase
       .from('quizzes')
-      .select('user_id')
+      .select('id, title, user_id, document_id')
       .eq('id', id)
       .single();
 
@@ -303,6 +306,23 @@ const deleteQuiz = async (req, res) => {
       .eq('id', id);
 
     if (error) throw error;
+
+    // Notify user if admin deleted their quiz
+    if (req.user.role === 'admin' && quiz.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        await createNotification(req, {
+          recipientId: quiz.user_id,
+          type: 'quiz_deleted_by_admin',
+          title: 'Quiz bị xóa bởi Admin',
+          message: `Bài ôn tập Quiz "${quiz.title}" của bạn đã bị Admin xóa.`,
+          docId: quiz.document_id || null
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send quiz deletion notification:', notifErr);
+      }
+    }
+
     res.status(200).json({ message: 'Xóa bài Quiz thành công' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -317,7 +337,7 @@ const deleteAttempt = async (req, res) => {
     // Check ownership
     const { data: attempt, error: checkErr } = await supabase
       .from('quiz_attempts')
-      .select('id, user_id')
+      .select('id, user_id, quiz:quizzes(title, document_id)')
       .eq('id', attemptId)
       .single();
 
@@ -332,6 +352,24 @@ const deleteAttempt = async (req, res) => {
       .eq('id', attemptId);
 
     if (error) throw error;
+
+    // Notify user if admin deleted their quiz attempt
+    if (req.user.role === 'admin' && attempt.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        const quizTitle = attempt.quiz?.title || 'Bài Quiz ôn tập';
+        await createNotification(req, {
+          recipientId: attempt.user_id,
+          type: 'attempt_deleted_by_admin',
+          title: 'Lịch sử làm bài bị xóa',
+          message: `Lịch sử làm bài của bài ôn tập "${quizTitle}" đã bị Admin xóa.`,
+          docId: attempt.quiz?.document_id || null
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send quiz attempt deletion notification:', notifErr);
+      }
+    }
+
     res.status(200).json({ message: 'Xóa lịch sử làm bài thành công' });
   } catch (error) {
     res.status(500).json({ error: error.message });

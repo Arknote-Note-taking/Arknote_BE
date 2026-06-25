@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "concurrently \"nodemon server.js\" \"python python_service/main.py\"",
-    "python-service": "python python_service/main.py",
+    "dev": "concurrently \"nodemon server.js\" \"python -X utf8 python_service/main.py\"",
+    "python-service": "python -X utf8 python_service/main.py",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

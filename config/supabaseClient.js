@@ -9,5 +9,6 @@ if (!supabaseUrl || !supabaseKey) {
 }
 
 const supabase = createClient(supabaseUrl, supabaseKey);
+console.log('Initializing Supabase client with key starting with:', supabaseKey ? supabaseKey.substring(0, 15) : 'undefined');
 
 module.exports = supabase;

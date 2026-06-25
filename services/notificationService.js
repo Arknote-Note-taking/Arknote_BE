@@ -6,19 +6,39 @@ const createNotification = async (req, { recipientId, isForAdmin, type, title, m
     let newNotif = null;
     
     // 1. Try to insert into database
-    const { data, error } = await supabase
+    const insertObj = {
+      recipient_id: recipientId || null,
+      is_for_admin: !!isForAdmin,
+      type,
+      title,
+      message,
+      read: false,
+      doc_id: docId || null
+    };
+
+    let { data, error } = await supabase
       .from('notifications')
-      .insert([{
-        recipient_id: recipientId || null,
-        is_for_admin: !!isForAdmin,
-        type,
-        title,
-        message,
-        read: false,
-        doc_id: docId || null
-      }])
+      .insert([insertObj])
       .select()
       .single();
+
+    if (error) {
+      // If error is due to missing doc_id column (PGRST204), try inserting without doc_id
+      if (error.code === 'PGRST204' || (error.message && error.message.includes('doc_id'))) {
+        console.warn('[NotificationService] doc_id column not found in database notifications table. Retrying insert without doc_id.');
+        const retryInsertObj = { ...insertObj };
+        delete retryInsertObj.doc_id;
+
+        const retryResult = await supabase
+          .from('notifications')
+          .insert([retryInsertObj])
+          .select()
+          .single();
+
+        data = retryResult.data;
+        error = retryResult.error;
+      }
+    }
 
     if (error) {
       if (error.code === '42P01' || error.code === 'PGRST205') {
@@ -44,17 +64,19 @@ const createNotification = async (req, { recipientId, isForAdmin, type, title, m
     }
 
     // 2. Fallback payload construction
-    const payload = newNotif || {
-      id: Date.now().toString(),
-      recipient_id: recipientId || null,
-      is_for_admin: !!isForAdmin,
-      type,
-      title,
-      message,
-      read: false,
-      created_at: new Date().toISOString(),
-      doc_id: docId || null
-    };
+    const payload = newNotif 
+      ? { ...newNotif, doc_id: newNotif.doc_id !== undefined ? newNotif.doc_id : (docId || null) }
+      : {
+          id: Date.now().toString(),
+          recipient_id: recipientId || null,
+          is_for_admin: !!isForAdmin,
+          type,
+          title,
+          message,
+          read: false,
+          created_at: new Date().toISOString(),
+          doc_id: docId || null
+        };
 
     // 3. Emit via socket.io
     if (req.io) {

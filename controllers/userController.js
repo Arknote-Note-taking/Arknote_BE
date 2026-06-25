@@ -66,6 +66,8 @@ const getUsers = async (req, res) => {
 
     if (error) throw error;
     
+    console.log(`[getUsers] Admin: ${req.user.email}, Users found in DB: ${users ? users.length : 0}`);
+    
     // Alias id to _id for FE and append is_pro
     const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: !!u.is_pro }));
     res.status(200).json(formatted);

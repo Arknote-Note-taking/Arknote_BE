@@ -29,14 +29,36 @@ const createDeck = async (req, res) => {
 // 2. Get all decks for user
 const getDecks = async (req, res) => {
   try {
-    const { data: decks, error } = await supabase
+    let query = supabase
       .from('flashcard_decks')
-      .select('*, documents(title)')
-      .eq('user_id', req.user.id)
-      .order('created_at', { ascending: false });
+      .select('*, documents(title)');
 
+    if (req.user.role !== 'admin') {
+      query = query.eq('user_id', req.user.id);
+    }
+
+    const { data: decks, error } = await query.order('created_at', { ascending: false });
     if (error) throw error;
-    res.status(200).json(decks);
+
+    let responseDecks = decks;
+    if (req.user.role === 'admin') {
+      const { data: users, error: userErr } = await supabase
+        .from('users')
+        .select('id, email, name');
+      
+      if (!userErr && users) {
+        const userMap = {};
+        users.forEach(u => {
+          userMap[u.id] = { email: u.email, name: u.name };
+        });
+        responseDecks = decks.map(deck => ({
+          ...deck,
+          users: userMap[deck.user_id] || null
+        }));
+      }
+    }
+
+    res.status(200).json(responseDecks);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -77,6 +99,7 @@ const getDeckById = async (req, res) => {
 const generateAiFlashcards = async (req, res) => {
   try {
     const { documentId, count } = req.body;
+    console.log("SUPABASE_KEY inside controller:", process.env.SUPABASE_KEY ? process.env.SUPABASE_KEY.substring(0, 15) : 'undefined');
     if (!documentId) return res.status(400).json({ error: 'Mã tài liệu là bắt buộc' });
 
     // Fetch document
@@ -231,8 +254,8 @@ const updateDeck = async (req, res) => {
       .single();
 
     if (getErr || !deck) return res.status(404).json({ error: 'Không tìm thấy bộ Flashcard' });
-    if (deck.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
+    if (deck.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access forbidden: Chỉ chủ sở hữu mới có quyền chỉnh sửa bộ Flashcard này.' });
     }
 
     const { data: updatedDeck, error } = await supabase
@@ -257,13 +280,13 @@ const deleteDeck = async (req, res) => {
     // Verify ownership
     const { data: deck, error: getErr } = await supabase
       .from('flashcard_decks')
-      .select('user_id')
+      .select('user_id, title')
       .eq('id', id)
       .single();
 
     if (getErr || !deck) return res.status(404).json({ error: 'Không tìm thấy bộ Flashcard' });
     if (deck.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
+      return res.status(403).json({ error: 'Access forbidden: Chỉ chủ sở hữu mới có quyền xóa bộ Flashcard này.' });
     }
 
     const { error } = await supabase
@@ -272,6 +295,23 @@ const deleteDeck = async (req, res) => {
       .eq('id', id);
 
     if (error) throw error;
+
+    // Notify user if admin deleted their deck
+    if (req.user.role === 'admin' && deck.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        await createNotification(req, {
+          recipientId: deck.user_id,
+          type: 'deck_deleted_by_admin',
+          title: 'Bộ Flashcard bị xóa bởi Admin',
+          message: `Bộ Flashcard "${deck.title}" của bạn đã bị Admin xóa.`,
+          docId: null
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send deck deletion notification:', notifErr);
+      }
+    }
+
     res.status(200).json({ message: 'Xóa bộ Flashcard thành công' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -296,8 +336,8 @@ const createCard = async (req, res) => {
       .single();
 
     if (getErr || !deck) return res.status(404).json({ error: 'Không tìm thấy bộ Flashcard' });
-    if (deck.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
+    if (deck.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access forbidden: Chỉ chủ sở hữu mới có quyền thêm thẻ vào bộ Flashcard này.' });
     }
 
     const { data: card, error } = await supabase
@@ -335,8 +375,8 @@ const updateCard = async (req, res) => {
       .single();
 
     if (cardErr || !card) return res.status(404).json({ error: 'Flashcard không tồn tại' });
-    if (card.flashcard_decks.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
+    if (card.flashcard_decks.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access forbidden: Chỉ chủ sở hữu mới có quyền chỉnh sửa thẻ ghi nhớ này.' });
     }
 
     const { data: updatedCard, error } = await supabase
@@ -361,13 +401,15 @@ const deleteCard = async (req, res) => {
     // Verify ownership via card's deck
     const { data: card, error: cardErr } = await supabase
       .from('flashcards')
-      .select('*, flashcard_decks(user_id)')
+      .select('*, flashcard_decks(user_id, title)')
       .eq('id', cardId)
       .single();
 
     if (cardErr || !card) return res.status(404).json({ error: 'Flashcard không tồn tại' });
-    if (card.flashcard_decks.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
+    
+    const deckOwnerId = card.flashcard_decks?.user_id;
+    if (deckOwnerId !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden: Chỉ chủ sở hữu mới có quyền xóa thẻ ghi nhớ này.' });
     }
 
     const { error } = await supabase
@@ -376,6 +418,24 @@ const deleteCard = async (req, res) => {
       .eq('id', cardId);
 
     if (error) throw error;
+
+    // Notify user if admin deleted their card
+    if (req.user.role === 'admin' && deckOwnerId !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        const deckTitle = card.flashcard_decks?.title || 'Bộ thẻ';
+        await createNotification(req, {
+          recipientId: deckOwnerId,
+          type: 'card_deleted_by_admin',
+          title: 'Thẻ ghi nhớ bị xóa bởi Admin',
+          message: `Thẻ ghi nhớ trong bộ "${deckTitle}" của bạn đã bị Admin xóa.`,
+          docId: null
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send card deletion notification:', notifErr);
+      }
+    }
+
     res.status(200).json({ message: 'Xóa Flashcard thành công' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -385,6 +445,9 @@ const deleteCard = async (req, res) => {
 // 11. Create a multiple-choice quiz from deck flashcards
 const createQuizFromDeck = async (req, res) => {
   try {
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Admin không được phép làm bài Quiz.' });
+    }
     const { id } = req.params; // Deck ID
 
     // 1. Fetch deck

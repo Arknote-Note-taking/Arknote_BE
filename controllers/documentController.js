@@ -32,12 +32,12 @@ const uploadDocument = async (req, res) => {
 
       if (countErr) throw countErr;
 
-      if (count >= 5) {
+      if (count >= 50) {
         // Delete uploaded temp file to avoid junk in uploads folder
         if (req.file.path && fs.existsSync(req.file.path)) {
           fs.unlinkSync(req.file.path);
         }
-        return res.status(403).json({ error: 'Bạn đã đạt giới hạn tải lên tối đa là 5 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên không giới hạn!' });
+        return res.status(403).json({ error: 'Bạn đã đạt giới hạn tải lên tối đa là 50 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên không giới hạn!' });
       }
     }
 
@@ -192,6 +192,7 @@ const getDocuments = async (req, res) => {
     const { data: docs, error } = await query;
     if (error) throw error;
     
+    console.log(`[getDocuments] User: ${req.user.email}, Role: ${req.user.role}, Docs found in DB: ${docs ? docs.length : 0}`);
     let responseDocs = docs.map(d => ({ ...d, _id: d.id }));
 
     // If admin, filter out duplicates by title
@@ -290,17 +291,34 @@ const updateDocument = async (req, res) => {
 
 const deleteDocument = async (req, res) => {
   try {
-    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id').eq('id', req.params.id).single();
+    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, title').eq('id', req.params.id).single();
     if (checkErr || !docCheck) return res.status(404).json({ error: 'Not found' });
     
     if (req.user.role !== 'admin' && docCheck.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const { error } = await supabase.from('documents').update({ is_deleted: true }).eq('id', req.params.id);
+    const { error } = await supabase.from('documents').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', req.params.id);
     if (error) throw error;
     
     req.io.emit('document_deleted', { id: req.params.id }); // Use standard id field
+    
+    // Notify user if admin deleted their document
+    if (req.user.role === 'admin' && docCheck.user_id !== req.user.id) {
+      try {
+        const { createNotification } = require('../services/notificationService');
+        await createNotification(req, {
+          recipientId: docCheck.user_id,
+          type: 'document_deleted_by_admin',
+          title: 'Tài liệu bị xóa bởi Admin',
+          message: `Tài liệu "${docCheck.title}" của bạn đã bị Admin xóa.`,
+          docId: docCheck.id
+        });
+      } catch (notifErr) {
+        console.error('[Notification] Failed to send document deletion notification:', notifErr);
+      }
+    }
+
     res.status(200).json({ message: 'Soft deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -384,7 +402,7 @@ const restoreDocument = async (req, res) => {
 
     const { data: doc, error } = await supabase
       .from('documents')
-      .update({ is_deleted: false })
+      .update({ is_deleted: false, deleted_at: null })
       .eq('id', req.params.id)
       .select()
       .single();
@@ -464,6 +482,8 @@ const getDashboardStats = async (req, res) => {
     
     const { data: allUserDocs, error } = await query;
     if (error) throw error;
+    
+    console.log(`[getDashboardStats] User: ${req.user.email}, Role: ${req.user.role}, Docs found: ${allUserDocs ? allUserDocs.length : 0}`);
     
     const totalDocs = allUserDocs.length;
     const processedDocs = allUserDocs.filter(d => d.summary && d.summary.trim() !== '').length;

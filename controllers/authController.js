@@ -29,8 +29,11 @@ const registerUser = async (req, res) => {
 
     console.log(`Attempting to register user: ${email}`);
 
+    const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
     // Sign up via Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.signUp({
+    const { data: authData, error: authError } = await authClient.auth.signUp({
       email,
       password,
       options: {
@@ -78,7 +81,10 @@ const loginUser = async (req, res) => {
   try {
     if (!email || !password) throw Error('All fields must be filled');
 
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+    const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    const { data: authData, error: authError } = await authClient.auth.signInWithPassword({
       email,
       password
     });
@@ -355,7 +361,10 @@ const setPassword = async (req, res) => {
     }
 
     // 4. Re-authenticate to get a fresh token (because changing password revokes old tokens)
-    const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
+    const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    const { data: authData, error: signInError } = await authClient.auth.signInWithPassword({
       email: user.email,
       password: newPassword
     });

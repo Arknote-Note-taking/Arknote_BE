@@ -85,4 +85,8 @@ app.use((err, req, res, next) => {
 // Database connection & Server Startup
 server.listen(process.env.PORT, () => {
   console.log(`Server running on port ${process.env.PORT} - Connected to Supabase`);
+  
+  // Start automatic document cleanup background service
+  const { startCleanupInterval } = require('./services/cleanupService');
+  startCleanupInterval(io);
 });
