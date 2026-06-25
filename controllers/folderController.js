@@ -80,7 +80,20 @@ const getFolderById = async (req, res) => {
       .single();
 
     if (folderErr || !folder) return res.status(404).json({ error: 'Folder not found' });
-    if (folder.user_id !== req.user.id && req.user.role !== 'admin') {
+    let hasAccess = false;
+    if (folder.user_id === req.user.id || req.user.role === 'admin') {
+      hasAccess = true;
+    } else {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', id)
+        .eq('shared_to_email', req.user.email)
+        .maybeSingle();
+      if (share) hasAccess = true;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
@@ -153,7 +166,21 @@ const addDocsToFolder = async (req, res) => {
       .single();
 
     if (folderErr || !folder) return res.status(404).json({ error: 'Folder not found' });
-    if (folder.user_id !== req.user.id && req.user.role !== 'admin') {
+    let hasAccess = false;
+    if (folder.user_id === req.user.id || req.user.role === 'admin') {
+      hasAccess = true;
+    } else {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', id)
+        .eq('shared_to_email', req.user.email)
+        .eq('permission_role', 'editor')
+        .maybeSingle();
+      if (share) hasAccess = true;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
@@ -184,7 +211,21 @@ const updateFolder = async (req, res) => {
       .single();
 
     if (folderErr || !folder) return res.status(404).json({ error: 'Folder not found' });
-    if (folder.user_id !== req.user.id && req.user.role !== 'admin') {
+    let hasAccess = false;
+    if (folder.user_id === req.user.id || req.user.role === 'admin') {
+      hasAccess = true;
+    } else {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', id)
+        .eq('shared_to_email', req.user.email)
+        .eq('permission_role', 'editor')
+        .maybeSingle();
+      if (share) hasAccess = true;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 

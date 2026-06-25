@@ -4,17 +4,18 @@ const {
   getChatHistories, createChatHistory, updateChatHistory, deleteChatHistory 
 } = require('../controllers/aiController');
 const { requireAuth } = require('../middlewares/auth');
+const { checkAiLimit } = require('../middlewares/aiLimit');
 
 const router = express.Router();
 
 router.use(requireAuth);
 
-router.post('/summarize', triggerSummarize);
-router.post('/qna', triggerQnA);
-router.post('/chat', triggerChat);
-router.post('/reanalyze', triggerReanalyze);
-router.post('/folder-chat', triggerFolderChat);
-router.post('/quiz', triggerQuiz);
+router.post('/summarize', checkAiLimit, triggerSummarize);
+router.post('/qna', checkAiLimit, triggerQnA);
+router.post('/chat', checkAiLimit, triggerChat);
+router.post('/reanalyze', checkAiLimit, triggerReanalyze);
+router.post('/folder-chat', checkAiLimit, triggerFolderChat);
+router.post('/quiz', checkAiLimit, triggerQuiz);
 
 // Chat histories CRUD
 router.get('/chats', getChatHistories);

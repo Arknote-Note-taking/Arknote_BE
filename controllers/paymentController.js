@@ -1,34 +1,6 @@
 const { PayOS } = require('@payos/node');
-const fs = require('fs');
-const path = require('path');
+const supabase = require('../config/supabaseClient');
 const { setUserPro } = require('./userController');
-
-const PAY_FILE = path.join(__dirname, '../data/payments.json');
-
-const initPaymentsFile = () => {
-  const dir = path.dirname(PAY_FILE);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  if (!fs.existsSync(PAY_FILE)) {
-    fs.writeFileSync(PAY_FILE, JSON.stringify({}));
-  }
-};
-
-const getPayments = () => {
-  initPaymentsFile();
-  try {
-    const data = fs.readFileSync(PAY_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (e) {
-    return {};
-  }
-};
-
-const savePayments = (payments) => {
-  initPaymentsFile();
-  fs.writeFileSync(PAY_FILE, JSON.stringify(payments, null, 2));
-};
 
 const PAYOS_CLIENT_ID = process.env.PAYOS_CLIENT_ID;
 const PAYOS_API_KEY = process.env.PAYOS_API_KEY;
@@ -106,16 +78,18 @@ const createPaymentLink = async (req, res) => {
       checkoutUrl = paymentLink.checkoutUrl;
     }
 
-    // Save transaction
-    const payments = getPayments();
-    payments[orderCode] = {
-      userId: userId,
-      status: 'pending',
-      amount: finalAmount,
-      paymentLinkId: isMock ? 'mock_link_id' : '',
-      createdAt: new Date().toISOString()
-    };
-    savePayments(payments);
+    // Save transaction to Supabase
+    const { error: insertError } = await supabase
+      .from('payments')
+      .insert([{
+        user_id: userId,
+        order_code: orderCode,
+        amount: finalAmount,
+        status: 'pending',
+        payment_link_id: isMock ? 'mock_link_id' : ''
+      }]);
+
+    if (insertError) throw insertError;
 
     res.status(200).json({ checkoutUrl, orderCode });
   } catch (error) {
@@ -131,9 +105,14 @@ const verifyPayment = async (req, res) => {
       return res.status(400).json({ error: 'Mã đơn hàng (orderCode) là bắt buộc' });
     }
 
-    const payments = getPayments();
-    const transaction = payments[orderCode];
-    if (!transaction) {
+    // Fetch transaction from Supabase
+    const { data: transaction, error: fetchError } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('order_code', orderCode)
+      .single();
+
+    if (fetchError || !transaction) {
       return res.status(404).json({ error: 'Không tìm thấy thông tin giao dịch trong hệ thống' });
     }
 
@@ -143,17 +122,22 @@ const verifyPayment = async (req, res) => {
       console.log(`[MOCK PAYMENT] Verifying order ${orderCode} (Automatic approval)`);
 
       // Upgrade user
-      setUserPro(transaction.userId, true);
+      await setUserPro(transaction.user_id, true);
 
-      // Update transaction status
-      transaction.status = 'paid';
-      transaction.paidAt = new Date().toISOString();
-      payments[orderCode] = transaction;
-      savePayments(payments);
+      // Update transaction status in Supabase
+      const { error: updateError } = await supabase
+        .from('payments')
+        .update({
+          status: 'paid',
+          paid_at: new Date().toISOString()
+        })
+        .eq('order_code', orderCode);
+
+      if (updateError) throw updateError;
 
       // Notify via Socket
       if (req.io) {
-        req.io.emit('payment_success', { userId: transaction.userId, orderCode });
+        req.io.emit('payment_success', { userId: transaction.user_id, orderCode });
       }
 
       return res.status(200).json({
@@ -173,17 +157,22 @@ const verifyPayment = async (req, res) => {
 
     if (paymentInfo && (paymentInfo.status === 'PAID' || paymentInfo.status === 'COMPLETED')) {
       // Upgrade user
-      setUserPro(transaction.userId, true);
+      await setUserPro(transaction.user_id, true);
 
-      // Update transaction status
-      transaction.status = 'paid';
-      transaction.paidAt = new Date().toISOString();
-      payments[orderCode] = transaction;
-      savePayments(payments);
+      // Update transaction status in Supabase
+      const { error: updateError } = await supabase
+        .from('payments')
+        .update({
+          status: 'paid',
+          paid_at: new Date().toISOString()
+        })
+        .eq('order_code', orderCode);
+
+      if (updateError) throw updateError;
 
       // Notify via Socket
       if (req.io) {
-        req.io.emit('payment_success', { userId: transaction.userId, orderCode });
+        req.io.emit('payment_success', { userId: transaction.user_id, orderCode });
       }
 
       return res.status(200).json({
@@ -219,19 +208,28 @@ const handleWebhook = async (req, res) => {
     if (webhookData) {
       const { orderCode } = webhookData;
 
-      const payments = getPayments();
-      const transaction = payments[orderCode];
+      // Fetch transaction from Supabase
+      const { data: transaction, error: fetchError } = await supabase
+        .from('payments')
+        .select('*')
+        .eq('order_code', orderCode)
+        .single();
 
-      if (transaction) {
-        setUserPro(transaction.userId, true);
+      if (transaction && transaction.status !== 'paid') {
+        await setUserPro(transaction.user_id, true);
 
-        transaction.status = 'paid';
-        transaction.paidAt = new Date().toISOString();
-        payments[orderCode] = transaction;
-        savePayments(payments);
+        const { error: updateError } = await supabase
+          .from('payments')
+          .update({
+            status: 'paid',
+            paid_at: new Date().toISOString()
+          })
+          .eq('order_code', orderCode);
+
+        if (updateError) throw updateError;
 
         if (req.io) {
-          req.io.emit('payment_success', { userId: transaction.userId, orderCode });
+          req.io.emit('payment_success', { userId: transaction.user_id, orderCode });
         }
       }
 

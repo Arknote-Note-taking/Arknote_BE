@@ -7,7 +7,9 @@ const {
   updateProgress,
   submitAttempt,
   getAttemptById,
-  getQuizAttemptsForAdmin
+  getQuizAttemptsForAdmin,
+  deleteQuiz,
+  deleteAttempt
 } = require('../controllers/quizController');
 const { requireAuth } = require('../middlewares/auth');
 
@@ -24,10 +26,13 @@ router.get('/attempts', getAttempts);
 router.put('/attempts/:attemptId/progress', updateProgress);
 router.post('/attempts/:attemptId/submit', submitAttempt);
 router.get('/attempts/:attemptId', getAttemptById);
+router.delete('/attempts/:attemptId', deleteAttempt);
 
 // Quiz-specific routes (parameterized with :id)
 router.get('/:id/attempts/admin', getQuizAttemptsForAdmin);
 router.post('/:id/attempts', startAttempt);
 router.get('/:id', getQuizById);
+router.delete('/:id', deleteQuiz);
 
+// Export quizzes router
 module.exports = router;

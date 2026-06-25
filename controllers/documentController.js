@@ -11,7 +11,7 @@ const uploadDocument = async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     // Enforce dynamic file size check based on user plan
-    const userPro = isUserPro(req.user.id);
+    const userPro = await isUserPro(req.user.id);
     const sizeLimit = userPro || req.user.role === 'admin' ? 100 * 1024 * 1024 : 5 * 1024 * 1024; // 100MB vs 5MB
     if (req.file.size > sizeLimit) {
       if (req.file.path && fs.existsSync(req.file.path)) {
@@ -168,10 +168,25 @@ const uploadDocument = async (req, res) => {
 
 const getDocuments = async (req, res) => {
   try {
-    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, is_pinned').eq('is_deleted', false);
+    let sharedFolderIds = [];
+    if (req.user.role !== 'admin') {
+      const { data: shares } = await supabase
+        .from('folder_shares')
+        .select('folder_id')
+        .eq('shared_to_email', req.user.email);
+      if (shares && shares.length > 0) {
+        sharedFolderIds = shares.map(s => s.folder_id).filter(id => id !== null);
+      }
+    }
+
+    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, is_pinned, folder_id').eq('is_deleted', false);
     
     if (req.user.role !== 'admin') {
-      query = query.eq('user_id', req.user.id);
+      if (sharedFolderIds.length > 0) {
+        query = query.or(`user_id.eq.${req.user.id},folder_id.in.(${sharedFolderIds.map(id => `"${id}"`).join(',')})`);
+      } else {
+        query = query.eq('user_id', req.user.id);
+      }
     }
     
     const { data: docs, error } = await query;
@@ -209,7 +224,21 @@ const getDocumentById = async (req, res) => {
     if (req.user.role === 'admin') {
       return res.status(403).json({ error: 'Admin chỉ quản lý tài liệu, không thể xem chi tiết nội dung tài liệu.' });
     }
-    if (doc.user_id !== req.user.id) {
+    
+    let hasAccess = false;
+    if (doc.user_id === req.user.id) {
+      hasAccess = true;
+    } else if (doc.folder_id) {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', doc.folder_id)
+        .eq('shared_to_email', req.user.email)
+        .maybeSingle();
+      if (share) hasAccess = true;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
     
@@ -221,10 +250,24 @@ const getDocumentById = async (req, res) => {
 
 const updateDocument = async (req, res) => {
   try {
-    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, is_deleted').eq('id', req.params.id).single();
+    const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, is_deleted, folder_id').eq('id', req.params.id).single();
     if (checkErr || !docCheck || docCheck.is_deleted) return res.status(404).json({ error: 'Not found' });
     
-    if (req.user.role !== 'admin' && docCheck.user_id !== req.user.id) {
+    let canUpdate = false;
+    if (docCheck.user_id === req.user.id || req.user.role === 'admin') {
+      canUpdate = true;
+    } else if (docCheck.folder_id) {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', docCheck.folder_id)
+        .eq('shared_to_email', req.user.email)
+        .eq('permission_role', 'editor')
+        .maybeSingle();
+      if (share) canUpdate = true;
+    }
+
+    if (!canUpdate) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 

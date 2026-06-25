@@ -64,7 +64,7 @@ const registerUser = async (req, res) => {
       email, 
       token: authData.session ? getCustomToken(userData.id, userData.email) : 'check-email', 
       role: userData.role,
-      is_pro: isUserPro(userData.id),
+      is_pro: await isUserPro(userData.id),
       onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
@@ -122,7 +122,7 @@ const loginUser = async (req, res) => {
       token: getCustomToken(userData.id, userData.email), 
       role: userData.role,
       avatar_url: userData.avatar_url,
-      is_pro: isUserPro(userData.id),
+      is_pro: await isUserPro(userData.id),
       onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
@@ -288,7 +288,7 @@ const googleLogin = async (req, res) => {
         role: 'user',
         avatar_url,
         needsPassword: true,
-        is_pro: isUserPro(user.id),
+        is_pro: await isUserPro(user.id),
         onboarding_completed: false
       });
     }
@@ -302,7 +302,7 @@ const googleLogin = async (req, res) => {
       role: userData.role,
       avatar_url: userData.avatar_url,
       needsPassword: !userData.has_password,
-      is_pro: isUserPro(userData.id),
+      is_pro: await isUserPro(userData.id),
       onboarding_completed: userData.onboarding_completed || false
     });
   } catch (error) {
