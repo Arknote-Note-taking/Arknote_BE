@@ -179,7 +179,7 @@ const getDocuments = async (req, res) => {
       }
     }
 
-    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, is_pinned, folder_id').eq('is_deleted', false);
+    let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, folder_id').eq('is_deleted', false);
     
     if (req.user.role !== 'admin') {
       if (sharedFolderIds.length > 0) {
@@ -192,8 +192,21 @@ const getDocuments = async (req, res) => {
     const { data: docs, error } = await query;
     if (error) throw error;
     
+    // Fetch user-specific pins from document_annotations
+    const { data: pins } = await supabase
+      .from('document_annotations')
+      .select('document_id')
+      .eq('user_id', req.user.id)
+      .eq('selected_text', '__PIN__');
+
+    const pinnedDocIds = new Set(pins ? pins.map(p => p.document_id) : []);
+
     console.log(`[getDocuments] User: ${req.user.email}, Role: ${req.user.role}, Docs found in DB: ${docs ? docs.length : 0}`);
-    let responseDocs = docs.map(d => ({ ...d, _id: d.id }));
+    let responseDocs = docs.map(d => ({
+      ...d,
+      _id: d.id,
+      is_pinned: pinnedDocIds.has(d.id)
+    }));
 
     // If admin, filter out duplicates by title
     if (req.user.role === 'admin') {
@@ -227,8 +240,10 @@ const getDocumentById = async (req, res) => {
     }
     
     let hasAccess = false;
+    let canEdit = false;
     if (doc.user_id === req.user.id) {
       hasAccess = true;
+      canEdit = true;
     } else if (doc.folder_id) {
       const { data: share } = await supabase
         .from('folder_shares')
@@ -236,14 +251,26 @@ const getDocumentById = async (req, res) => {
         .eq('folder_id', doc.folder_id)
         .eq('shared_to_email', req.user.email)
         .maybeSingle();
-      if (share) hasAccess = true;
+      if (share) {
+        hasAccess = true;
+        canEdit = (share.permission_role === 'editor');
+      }
     }
 
     if (!hasAccess) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
+
+    // Check user-specific pin
+    const { data: pin } = await supabase
+      .from('document_annotations')
+      .select('id')
+      .eq('document_id', doc.id)
+      .eq('user_id', req.user.id)
+      .eq('selected_text', '__PIN__')
+      .maybeSingle();
     
-    res.status(200).json({ ...doc, _id: doc.id });
+    res.status(200).json({ ...doc, _id: doc.id, canEdit, is_pinned: !!pin });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -272,16 +299,70 @@ const updateDocument = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
-    const { data: doc, error } = await supabase
-      .from('documents')
-      .update(req.body)
-      .eq('id', req.params.id)
-      .select()
-      .single();
+    let isPinnedUpdated = false;
+    let newPinState = false;
+    if (req.body.hasOwnProperty('is_pinned')) {
+      isPinnedUpdated = true;
+      newPinState = req.body.is_pinned;
       
-    if (error) throw error;
+      if (newPinState) {
+        // Create user pin annotation
+        await supabase
+          .from('document_annotations')
+          .insert([{
+            document_id: req.params.id,
+            user_id: req.user.id,
+            selected_text: '__PIN__',
+            note: 'pinned',
+            color: '#ffeb3b'
+          }]);
+      } else {
+        // Remove user pin annotation
+        await supabase
+          .from('document_annotations')
+          .delete()
+          .eq('document_id', req.params.id)
+          .eq('user_id', req.user.id)
+          .eq('selected_text', '__PIN__');
+      }
+      
+      // Delete is_pinned so it doesn't modify the shared/global documents table column
+      delete req.body.is_pinned;
+    }
+
+    let updatedDoc = null;
+    if (Object.keys(req.body).length > 0) {
+      const { data: doc, error } = await supabase
+        .from('documents')
+        .update(req.body)
+        .eq('id', req.params.id)
+        .select()
+        .single();
+      if (error) throw error;
+      updatedDoc = doc;
+    } else {
+      const { data: doc } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('id', req.params.id)
+        .single();
+      updatedDoc = doc;
+    }
+
+    // Determine pinning state for response
+    let finalPinState = newPinState;
+    if (!isPinnedUpdated) {
+      const { data: pin } = await supabase
+        .from('document_annotations')
+        .select('id')
+        .eq('document_id', req.params.id)
+        .eq('user_id', req.user.id)
+        .eq('selected_text', '__PIN__')
+        .maybeSingle();
+      finalPinState = !!pin;
+    }
     
-    const responseDoc = { ...doc, _id: doc.id };
+    const responseDoc = { ...updatedDoc, _id: updatedDoc.id, is_pinned: finalPinState };
     req.io.emit('document_updated', responseDoc);
     res.status(200).json(responseDoc);
   } catch (error) {
@@ -339,6 +420,38 @@ const getDeletedDocuments = async (req, res) => {
     const { data: docs, error } = await query;
     if (error) throw error;
     
+    // Fetch active restore request notifications from DB using message field since doc_id column may be missing
+    const { data: notifications } = await supabase
+      .from('notifications')
+      .select('id, message, type')
+      .eq('type', 'document_restore_request');
+
+    // Fetch local notifications
+    const { readLocalNotifications } = require('../services/notificationStorage');
+    const localNotifs = readLocalNotifications();
+
+    const requestedDocIds = new Set();
+    if (notifications) {
+      notifications.forEach(n => {
+        if (n.message && n.message.includes('|||doc_id:')) {
+          const docId = n.message.split('|||doc_id:')[1];
+          if (docId) requestedDocIds.add(docId);
+        }
+      });
+    }
+    if (localNotifs) {
+      localNotifs.forEach(n => {
+        if (n.type === 'document_restore_request') {
+          if (n.doc_id) {
+            requestedDocIds.add(n.doc_id);
+          } else if (n.message && n.message.includes('|||doc_id:')) {
+            const docId = n.message.split('|||doc_id:')[1];
+            if (docId) requestedDocIds.add(docId);
+          }
+        }
+      });
+    }
+
     const { data: users, error: userErr } = await supabase.from('users').select('id, email');
     const userMap = {};
     if (!userErr && users) {
@@ -348,7 +461,8 @@ const getDeletedDocuments = async (req, res) => {
     let formatted = docs.map(d => ({ 
       ...d, 
       _id: d.id,
-      user_email: userMap[d.user_id] || 'Unknown' 
+      user_email: userMap[d.user_id] || 'Unknown',
+      restore_requested: requestedDocIds.has(d.id)
     }));
 
     // Filter out duplicates by title
@@ -407,6 +521,19 @@ const restoreDocument = async (req, res) => {
       .select()
       .single();
     if (error) throw error;
+
+    // Delete active restore request notifications for this document from DB
+    await supabase
+      .from('notifications')
+      .delete()
+      .eq('type', 'document_restore_request')
+      .eq('doc_id', req.params.id);
+
+    // Delete matching local notifications
+    const { readLocalNotifications, writeLocalNotifications } = require('../services/notificationStorage');
+    const localNotifs = readLocalNotifications();
+    const updatedNotifs = localNotifs.filter(n => !(n.type === 'document_restore_request' && n.doc_id === req.params.id));
+    writeLocalNotifications(updatedNotifs);
     
     const responseDoc = { ...doc, _id: doc.id };
     req.io.emit('document_created', responseDoc);
@@ -417,7 +544,7 @@ const restoreDocument = async (req, res) => {
       recipientId: doc.user_id,
       type: 'document_restored',
       title: 'Tài liệu đã được khôi phục',
-      message: `Tài liệu "${doc.title}" của bạn đã được Admin khôi phục thành công!`,
+      message: `Tài liệu "${doc.title}" của bạn đã được Admin khôi phục thành công! |||doc_id:${doc.id}`,
       docId: doc.id
     });
 
@@ -461,7 +588,7 @@ const requestRestoreDocument = async (req, res) => {
       isForAdmin: true,
       type: 'document_restore_request',
       title: 'Yêu cầu khôi phục tài liệu',
-      message: `Tài liệu: ${doc.title} (Yêu cầu từ: ${req.user.email})`,
+      message: `Tài liệu: ${doc.title} (Yêu cầu từ: ${req.user.email}) |||doc_id:${doc.id}`,
       docId: doc.id
     });
     

@@ -8,14 +8,14 @@ const isUserPro = async (userId) => {
       .eq('id', userId)
       .single();
     if (error || !user) return false;
-    
+
     // Check if pro has expired
     if (user.is_pro && user.pro_expires_at && new Date(user.pro_expires_at) < new Date()) {
       // Auto downgrade in database
       await supabase.from('users').update({ is_pro: false }).eq('id', userId);
       return false;
     }
-    
+
     return !!user.is_pro;
   } catch (err) {
     console.error('Error checking isUserPro:', err);
@@ -28,8 +28,8 @@ const setUserPro = async (userId, status) => {
     const expiresAt = status ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() : null; // 30 days
     await supabase
       .from('users')
-      .update({ 
-        is_pro: status, 
+      .update({
+        is_pro: status,
         pro_expires_at: expiresAt,
         ai_credits_remaining: status ? 500 : 30 // Pro users get more daily credits
       })
@@ -44,7 +44,7 @@ const getUsers = async (req, res) => {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Access forbidden' });
     }
-    
+
     let users, error;
     const resUsers = await supabase
       .from('users')
@@ -65,9 +65,9 @@ const getUsers = async (req, res) => {
     }
 
     if (error) throw error;
-    
+
     console.log(`[getUsers] Admin: ${req.user.email}, Users found in DB: ${users ? users.length : 0}`);
-    
+
     // Alias id to _id for FE and append is_pro
     const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: !!u.is_pro }));
     res.status(200).json(formatted);
@@ -81,7 +81,7 @@ const getDeletedUsers = async (req, res) => {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Access forbidden' });
     }
-    
+
     let users, error;
     const resUsers = await supabase
       .from('users')
@@ -98,8 +98,45 @@ const getDeletedUsers = async (req, res) => {
     }
 
     if (error) throw error;
-    
-    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: !!u.is_pro }));
+
+    // Fetch active user restore requests from DB using message field since user_id column may be missing
+    const { data: notifications } = await supabase
+      .from('notifications')
+      .select('id, message, type')
+      .eq('type', 'user_restore_request');
+
+    // Fetch local notifications
+    const { readLocalNotifications } = require('../services/notificationStorage');
+    const localNotifs = readLocalNotifications();
+
+    const requestedUserIds = new Set();
+    if (notifications) {
+      notifications.forEach(n => {
+        if (n.message && n.message.includes('|||user_id:')) {
+          const userId = n.message.split('|||user_id:')[1];
+          if (userId) requestedUserIds.add(userId);
+        }
+      });
+    }
+    if (localNotifs) {
+      localNotifs.forEach(n => {
+        if (n.type === 'user_restore_request') {
+          if (n.user_id) {
+            requestedUserIds.add(n.user_id);
+          } else if (n.message && n.message.includes('|||user_id:')) {
+            const userId = n.message.split('|||user_id:')[1];
+            if (userId) requestedUserIds.add(userId);
+          }
+        }
+      });
+    }
+
+    const formatted = users.map(u => ({
+      ...u,
+      _id: u.id,
+      is_pro: !!u.is_pro,
+      restore_requested: requestedUserIds.has(u.id)
+    }));
     res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -120,6 +157,13 @@ const restoreUser = async (req, res) => {
       .eq('id', userId);
 
     if (dbError) throw dbError;
+
+    // Delete restore request notifications for this user
+    await supabase
+      .from('notifications')
+      .delete()
+      .eq('type', 'user_restore_request')
+      .eq('user_id', userId);
 
     // Save & Emit notification to user
     const { createNotification } = require('../services/notificationService');
@@ -190,6 +234,12 @@ const permanentDeleteUser = async (req, res) => {
       return res.status(400).json({ error: 'Trầm trọng: Không thể tự xóa chính mình.' });
     }
 
+    // Delete from Supabase Auth first
+    const { error: authError } = await supabase.auth.admin.deleteUser(userId);
+    if (authError) {
+      console.error(`[permanentDeleteUser] Error deleting user ${userId} from Supabase Auth:`, authError.message);
+    }
+
     // Hard delete from users table
     const { error: dbError } = await supabase
       .from('users')
@@ -220,7 +270,7 @@ const getProfile = async (req, res) => {
       .single();
 
     if (error || !user) throw Error('User profile not found');
-    
+
     res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -240,7 +290,7 @@ const updateProfile = async (req, res) => {
       .single();
 
     if (error) throw error;
-    
+
     res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -261,7 +311,7 @@ const uploadAvatar = async (req, res) => {
       .single();
 
     if (error) throw error;
-    
+
     res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -271,7 +321,7 @@ const uploadAvatar = async (req, res) => {
 const upgradeToPro = async (req, res) => {
   try {
     await setUserPro(req.user.id, true);
-    
+
     const { data: user, error } = await supabase
       .from('users')
       .select('id, email, name, role, avatar_url, created_at, is_pro, ai_credits_remaining')
@@ -279,7 +329,7 @@ const upgradeToPro = async (req, res) => {
       .single();
 
     if (error || !user) throw Error('User profile not found');
-    
+
     res.status(200).json({ ...user, _id: user.id, is_pro: !!user.is_pro });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -316,6 +366,42 @@ const saveOnboardingSurvey = async (req, res) => {
   }
 };
 
+const requestRestoreAccount = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email là bắt buộc' });
+
+    // Find the user by email
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('id, name, is_deleted')
+      .eq('email', email.trim().toLowerCase())
+      .maybeSingle();
+
+    if (userErr || !user) {
+      return res.status(404).json({ error: 'Không tìm thấy tài khoản với email này.' });
+    }
+
+    if (!user.is_deleted) {
+      return res.status(400).json({ error: 'Tài khoản này đang hoạt động bình thường.' });
+    }
+
+    // Save & Emit notification to admin
+    const { createNotification } = require('../services/notificationService');
+    await createNotification(req, {
+      isForAdmin: true,
+      type: 'user_restore_request',
+      title: 'Yêu cầu khôi phục tài khoản',
+      message: `Tài khoản: ${email} (Yêu cầu khôi phục tài khoản) |||user_id:${user.id}`,
+      userId: user.id
+    });
+
+    res.status(200).json({ message: 'Đã gửi yêu cầu khôi phục tài khoản tới Admin.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getUsers,
   getDeletedUsers,
@@ -329,6 +415,7 @@ module.exports = {
   isUserPro,
   setUserPro,
   requestDeleteAccount,
-  saveOnboardingSurvey
+  saveOnboardingSurvey,
+  requestRestoreAccount
 };
 
