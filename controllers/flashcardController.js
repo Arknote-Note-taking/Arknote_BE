@@ -110,8 +110,23 @@ const generateAiFlashcards = async (req, res) => {
       .single();
 
     if (docErr || !doc || doc.is_deleted) return res.status(404).json({ error: 'Document not found' });
-    if (doc.user_id !== req.user.id && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Access forbidden' });
+    
+    let canGenerate = false;
+    if (doc.user_id === req.user.id || req.user.role === 'admin') {
+      canGenerate = true;
+    } else if (doc.folder_id) {
+      const { data: share } = await supabase
+        .from('folder_shares')
+        .select('*')
+        .eq('folder_id', doc.folder_id)
+        .eq('shared_to_email', req.user.email)
+        .eq('permission_role', 'editor')
+        .maybeSingle();
+      if (share) canGenerate = true;
+    }
+
+    if (!canGenerate) {
+      return res.status(403).json({ error: 'Bạn không có quyền tạo flashcard cho tài liệu này.' });
     }
 
     const userPro = await isUserPro(req.user.id);

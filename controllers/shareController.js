@@ -298,11 +298,69 @@ const getDocumentComments = async (req, res) => {
   }
 };
 
+const updateFolderShare = async (req, res) => {
+  try {
+    const { id } = req.params; // Share ID
+    const { permissionRole } = req.body;
+
+    if (!permissionRole || !['viewer', 'editor'].includes(permissionRole)) {
+      return res.status(400).json({ error: 'Quyền truy cập không hợp lệ (viewer hoặc editor)' });
+    }
+
+    // Check ownership of folder containing the share
+    const { data: share, error: shareErr } = await supabase
+      .from('folder_shares')
+      .select('*, folders(user_id, name)')
+      .eq('id', id)
+      .single();
+
+    if (shareErr || !share) return res.status(404).json({ error: 'Không tìm thấy liên kết chia sẻ' });
+    if (share.folders.user_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Access forbidden' });
+    }
+
+    // Update
+    const { data: updatedShare, error: updateErr } = await supabase
+      .from('folder_shares')
+      .update({ permission_role: permissionRole })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) throw updateErr;
+
+    // Send a notification that permissions changed
+    try {
+      const { data: targetUser } = await supabase
+        .from('users')
+        .select('id')
+        .ilike('email', share.shared_to_email)
+        .single();
+
+      if (targetUser) {
+        await createNotification(req, {
+          recipientId: targetUser.id,
+          type: 'folder_shared', // Use standard type to trigger real-time updates
+          title: 'Cập nhật quyền truy cập thư mục',
+          message: `Người dùng ${req.user.name || req.user.email} đã cập nhật quyền của bạn đối với thư mục "${share.folders?.name || 'thư mục'}" thành ${permissionRole === 'editor' ? 'Chỉnh sửa (Editor)' : 'Xem (Viewer)'}.`
+        });
+      }
+    } catch (notifErr) {
+      console.error('Error sending folder share update notification:', notifErr);
+    }
+
+    res.status(200).json(updatedShare);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   shareFolder,
   getFolderShares,
   deleteFolderShare,
   getSharedFolders,
   addDocumentComment,
-  getDocumentComments
+  getDocumentComments,
+  updateFolderShare
 };

@@ -97,7 +97,8 @@ const getAnnotations = async (req, res) => {
       .order('created_at', { ascending: true });
 
     if (error) throw error;
-    res.status(200).json(annotations);
+    const filteredAnnotations = annotations.filter(ann => ann.selected_text !== '__PIN__');
+    res.status(200).json(filteredAnnotations);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -2,7 +2,10 @@ const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middlewares/auth');
 const upload = require('../config/multerConfig');
-const { getUsers, getDeletedUsers, restoreUser, deleteUser, permanentDeleteUser, getProfile, updateProfile, uploadAvatar, upgradeToPro, requestDeleteAccount, saveOnboardingSurvey } = require('../controllers/userController');
+const { getUsers, getDeletedUsers, restoreUser, deleteUser, permanentDeleteUser, getProfile, updateProfile, uploadAvatar, upgradeToPro, requestDeleteAccount, saveOnboardingSurvey, requestRestoreAccount } = require('../controllers/userController');
+
+// Public route: Request account restoration (no auth needed)
+router.post('/request-restore', requestRestoreAccount);
 
 // All user routes require authentication
 router.use(requireAuth);
