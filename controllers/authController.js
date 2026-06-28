@@ -2,7 +2,47 @@ const supabase = require('../config/supabaseClient');
 const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
 const { isUserPro } = require('./userController');
+const dns = require('dns').promises;
 
+// List of common disposable email domains
+const DISPOSABLE_EMAIL_DOMAINS = [
+  'yopmail.com', 'mailinator.com', '10minutemail.com', 'tempmail.com', 
+  'guerrillamail.com', 'dispostable.com', 'getairmail.com', 'sharklasers.com', 
+  'trashmail.com', 'tempr.email', 'temp-mail.org', '10minutemail.net', 
+  '10minutemail.co.za', 'maildrop.cc', 'disposable.com', 'fakeinbox.com',
+  'generator.email', 'tempmailo.com', 'temp-mail.io', 'dropmail.me'
+];
+
+const isValidEmailDomain = async (email) => {
+  if (!email || typeof email !== 'string') {
+    return { valid: false, message: 'Email không hợp lệ.' };
+  }
+
+  const parts = email.split('@');
+  if (parts.length !== 2) {
+    return { valid: false, message: 'Định dạng email không hợp lệ.' };
+  }
+
+  const domain = parts[1].toLowerCase().trim();
+
+  // 1. Check disposable email domain list
+  if (DISPOSABLE_EMAIL_DOMAINS.includes(domain)) {
+    return { valid: false, message: 'Hệ thống không chấp nhận sử dụng email tạm thời (disposable email).' };
+  }
+
+  // 2. Perform DNS MX record lookup to verify real domain
+  try {
+    const mxRecords = await dns.resolveMx(domain);
+    if (!mxRecords || mxRecords.length === 0) {
+      return { valid: false, message: 'Tên miền email không tồn tại hoặc không thể nhận thư.' };
+    }
+  } catch (dnsError) {
+    console.error(`DNS MX resolve failed for domain ${domain}:`, dnsError.message);
+    return { valid: false, message: 'Tên miền email không tồn tại hoặc không thể nhận thư.' };
+  }
+
+  return { valid: true };
+};
 
 const getCustomToken = (id, email) => {
   return jwt.sign(
@@ -28,6 +68,12 @@ const registerUser = async (req, res) => {
     if (!name || !email || !password) return res.status(400).json({ error: 'All fields must be filled' });
 
     console.log(`Attempting to register user: ${email}`);
+
+    // Verify if email domain is valid and can receive mail (prevent fake/non-existent emails)
+    const emailCheck = await isValidEmailDomain(email);
+    if (!emailCheck.valid) {
+      return res.status(400).json({ error: emailCheck.message });
+    }
 
     const authClient = require('@supabase/supabase-js').createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
       auth: { persistSession: false, autoRefreshToken: false }

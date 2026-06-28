@@ -7,6 +7,7 @@
     "start": "node server.js",
     "dev": "concurrently \"nodemon server.js\" \"python -X utf8 python_service/main.py\"",
     "python-service": "python -X utf8 python_service/main.py",
+    "db:seed": "node seed_supabase.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
