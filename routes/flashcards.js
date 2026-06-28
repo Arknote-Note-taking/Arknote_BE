@@ -13,7 +13,8 @@ const {
   createCard,
   updateCard,
   deleteCard,
-  createQuizFromDeck
+  createQuizFromDeck,
+  importDeck
 } = require('../controllers/flashcardController');
 
 router.use(requireAuth);
@@ -24,6 +25,7 @@ router.get('/:id', getDeckById);
 router.put('/:id', updateDeck);
 router.delete('/:id', deleteDeck);
 router.post('/:id/quiz', createQuizFromDeck);
+router.post('/:id/import', importDeck);
 
 // Individual card CRUD endpoints
 router.post('/:deckId/cards', createCard);

@@ -100,24 +100,18 @@ const getKnowledgeGraph = async (req, res) => {
         
         if (embI && embJ && embI.length > 0 && embJ.length > 0) {
           sim = cosineSimilarity(embI, embJ);
-          if (sim > 0.60) { // Reduced threshold for semantic similarity
+          if (sim > 0.75) { // Heightened threshold for accurate semantic similarity
             isConnected = true;
           }
         }
         
-        // Fallback 1: Connect if they share at least one tag (case insensitive)
+        // Fallback 1: Connect if they share at least 2 tags (strong metadata connection)
         if (!isConnected && tagsI.length > 0 && tagsJ.length > 0) {
           const commonTags = tagsI.filter(t => tagsJ.some(tj => tj.toLowerCase().trim() === t.toLowerCase().trim()));
-          if (commonTags.length > 0) {
+          if (commonTags.length >= 2) {
             isConnected = true;
             sim = 0.5 + (0.1 * Math.min(commonTags.length, 3)); // Weight proportional to shared tags
           }
-        }
-
-        // Fallback 2: Connect if they share the same subject (excluding 'Khác')
-        if (!isConnected && subI && subJ && subI !== 'Khác' && subI === subJ) {
-          isConnected = true;
-          sim = 0.5;
         }
 
         if (isConnected) {

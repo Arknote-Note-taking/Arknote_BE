@@ -218,7 +218,7 @@ const triggerQuiz = async (req, res) => {
     const quizQuestions = await generateQuiz(doc.content, isPro, count ? parseInt(count, 10) : 5);
 
     // Save quiz to Supabase (check if it already exists)
-    const quizTitle = `Quiz: ${doc.title}`;
+    const quizTitle = doc.title;
 
     const { data: existingQuizzes, error: selectErr } = await supabase
       .from('quizzes')

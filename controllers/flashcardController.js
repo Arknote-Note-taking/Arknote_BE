@@ -77,7 +77,9 @@ const getDeckById = async (req, res) => {
       .single();
 
     if (deckErr || !deck) return res.status(404).json({ error: 'Không tìm thấy bộ Flashcard' });
-    if (deck.user_id !== req.user.id && req.user.role !== 'admin') {
+    
+    const isPublic = deck.description && deck.description.includes('|||public');
+    if (deck.user_id !== req.user.id && req.user.role !== 'admin' && !isPublic) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
@@ -141,7 +143,7 @@ const generateAiFlashcards = async (req, res) => {
       .insert([{
         user_id: req.user.id,
         document_id: documentId,
-        title: `Flashcard: ${doc.title}`,
+        title: doc.title,
       }])
       .select()
       .single();
@@ -530,7 +532,7 @@ const createQuizFromDeck = async (req, res) => {
     });
 
     // 4. Save quiz to Supabase quizzes table (check if it already exists)
-    const quizTitle = `Quiz: ${deck.title}`;
+    const quizTitle = deck.title;
 
     const { data: existingQuizzes, error: selectErr } = await supabase
       .from('quizzes')
@@ -585,6 +587,71 @@ const createQuizFromDeck = async (req, res) => {
   }
 };
 
+// 12. Import public flashcard deck
+const importDeck = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch the deck to check if it's public
+    const { data: deck, error: deckErr } = await supabase
+      .from('flashcard_decks')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (deckErr || !deck) return res.status(404).json({ error: 'Không tìm thấy bộ Flashcard' });
+
+    const isPublic = deck.description && deck.description.includes('|||public');
+    if (deck.user_id !== req.user.id && req.user.role !== 'admin' && !isPublic) {
+      return res.status(403).json({ error: 'Bạn không có quyền nhập bộ thẻ này.' });
+    }
+
+    // Clean public tag from the description
+    const cleanDesc = deck.description ? deck.description.replace('|||public', '').trim() : '';
+
+    // Insert new deck for the current user
+    const { data: newDeck, error: newDeckErr } = await supabase
+      .from('flashcard_decks')
+      .insert([{
+        user_id: req.user.id,
+        document_id: null,
+        title: `${deck.title} (Bản sao)`,
+        description: cleanDesc
+      }])
+      .select()
+      .single();
+
+    if (newDeckErr) throw newDeckErr;
+
+    // Fetch original cards
+    const { data: cards, error: cardsErr } = await supabase
+      .from('flashcards')
+      .select('*')
+      .eq('deck_id', id);
+
+    if (cardsErr) throw cardsErr;
+
+    // Clone cards into the new deck
+    if (cards && cards.length > 0) {
+      const cardsToInsert = cards.map(c => ({
+        deck_id: newDeck.id,
+        front_text: c.front_text,
+        back_text: c.back_text
+      }));
+
+      const { error: insertErr } = await supabase
+        .from('flashcards')
+        .insert(cardsToInsert);
+
+      if (insertErr) throw insertErr;
+    }
+
+    res.status(201).json(newDeck);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   createDeck,
   getDecks,
@@ -596,5 +663,6 @@ module.exports = {
   createCard,
   updateCard,
   deleteCard,
-  createQuizFromDeck
+  createQuizFromDeck,
+  importDeck
 };
