@@ -16,6 +16,7 @@ const quizRoutes = require('./routes/quizzes');
 const flashcardRoutes = require('./routes/flashcards');
 const shareRoutes = require('./routes/shares');
 const annotationRoutes = require('./routes/annotations');
+const publicRoutes = require('./routes/public');
 
 const app = express();
 const server = http.createServer(app);
@@ -57,6 +58,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/flashcards', flashcardRoutes);
 app.use('/api/shares', shareRoutes);
 app.use('/api/annotations', annotationRoutes);
+app.use('/api/public', publicRoutes);
 
 
 // Socket connection

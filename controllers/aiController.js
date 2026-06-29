@@ -2,6 +2,30 @@ const supabase = require('../config/supabaseClient');
 const { summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, extractMetadata, generateQuiz } = require('../services/aiService');
 const { isUserPro } = require('./userController');
 
+const getChatHistoryPrompt = async (chatId, userId) => {
+  if (!chatId) return '';
+  try {
+    const { data: chatObj, error: chatErr } = await supabase
+      .from('chat_histories')
+      .select('messages')
+      .eq('id', chatId)
+      .eq('user_id', userId)
+      .single();
+    
+    if (!chatErr && chatObj && chatObj.messages) {
+      const msgs = typeof chatObj.messages === 'string' ? JSON.parse(chatObj.messages) : chatObj.messages;
+      const recentMsgs = msgs.slice(-15);
+      if (recentMsgs.length > 0) {
+        return `\n[Lịch sử các lượt trò chuyện trước đó trong phiên chat này]:\n` + 
+          recentMsgs.map(m => `${m.role === 'user' ? 'Người dùng' : 'Trợ lý AI'}: ${m.text}`).join('\n') + '\n';
+      }
+    }
+  } catch (err) {
+    console.error('Error fetching chat history:', err);
+  }
+  return '';
+};
+
 const triggerSummarize = async (req, res) => {
   try {
     const { data: doc, error: err1 } = await supabase.from('documents').select('*').eq('id', req.body.documentId).single();
@@ -36,7 +60,7 @@ const triggerSummarize = async (req, res) => {
 
 const triggerQnA = async (req, res) => {
   try {
-    const { documentId, question } = req.body;
+    const { documentId, question, chatId } = req.body;
     const { data: doc, error: err1 } = await supabase.from('documents').select('id, user_id, is_deleted, content').eq('id', documentId).single();
     if (err1 || !doc || doc.is_deleted) return res.status(404).json({ error: 'Document not found' });
     
@@ -51,10 +75,11 @@ const triggerQnA = async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
 
     const isPro = (await isUserPro(req.user.id)) || req.user.role === 'admin';
+    const historyPrompt = await getChatHistoryPrompt(chatId, req.user.id);
     // Run streaming content generation
     await answerQuestionStream(doc.content, question, (chunk) => {
       res.write(chunk);
-    }, isPro);
+    }, isPro, historyPrompt);
     res.end();
   } catch (error) {
     if (res.headersSent) {
@@ -68,7 +93,7 @@ const triggerQnA = async (req, res) => {
 
 const triggerChat = async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, chatId } = req.body;
     if (!message) return res.status(400).json({ error: 'Message cannot be empty' });
     
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -81,8 +106,38 @@ const triggerChat = async (req, res) => {
     const useMockVal = !genAIObj;
 
     if (!useMockVal) {
-      const model = genAIObj.getGenerativeModel({ model: 'gemini-3-flash-preview' });
-      const result = await generateContentStreamWithRetry(model, message);
+      const model = genAIObj.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      const historyPrompt = await getChatHistoryPrompt(chatId, req.user.id);
+      const prompt = `Bạn là một trợ lý AI thông minh.
+Hãy tuân thủ các hướng dẫn, kỹ năng và quy tắc phản hồi sau đây:
+
+QUY TRÌNH PHẢN HỒI:
+1. Hiểu yêu cầu -> Xác định đúng mục tiêu, ý định của người dùng.
+2. Làm rõ (nếu cần) -> Hỏi thêm thông tin nếu yêu cầu mơ hồ hoặc thiếu thông tin, không tự suy diễn nếu có thể dẫn đến trả lời sai.
+3. Trả lời trực tiếp -> Đưa ra đáp án chính trước, tránh lan man.
+4. Giải thích -> Cung cấp lý do, ví dụ, hoặc hướng dẫn phù hợp với trình độ người dùng.
+5. Đề xuất tiếp theo -> Gợi ý các bước hoặc tài nguyên liên quan.
+
+CÁC KỸ NĂNG & QUY TẮC CỐT LÕI:
+- Lắng nghe và hiểu ý định (Intent Recognition): Nhận diện đúng mong muốn, hiểu ngữ cảnh, từ viết tắt, và lỗi chính tả.
+- Làm rõ khi thông tin chưa đủ (Clarification): Đặt câu hỏi bổ sung/hỏi ngược lại khi thông tin chưa đủ rõ ràng.
+- Phản hồi chính xác (Accuracy) & Trung thực: Đưa thông tin có căn cứ, thừa nhận khi không biết/không làm được thay vì tự bịa.
+- Phản hồi thích ứng (Adaptive Response): Điều chỉnh độ dài ngắn/mức độ chi tiết theo nhu cầu (vd: người dùng muốn "chỉ đáp án" hoặc "giải thích chi tiết").
+- Đồng cảm (Empathy) & Giọng điệu (Tone): Thể hiện sự thấu hiểu khi người dùng gặp khó khăn, giữ giọng điệu lịch sự, khách quan, chuyên nghiệp, thân thiện, học thuật hoặc hài hước tùy hoàn cảnh.
+- Phản hồi có cấu trúc (Structured Response): Chia thành các tiêu đề, gạch đầu dòng, bảng biểu, danh sách cho dễ theo dõi.
+- Tập trung vào giải pháp (Solution-Oriented): Đề xuất cách khắc phục và các bước giải quyết từng bước cụ thể.
+- Xử lý phản hồi tiêu cực & Tiếp nhận lỗi (Error Recovery): Cởi mở tiếp nhận góp ý, xin lỗi và cập nhật thông tin chính xác nếu câu trả lời trước chưa đúng.
+- Chủ động gợi ý (Proactive Assistance): Đề xuất bước tiếp theo hoặc gợi ý các ví dụ/tài liệu liên quan.
+- Tóm tắt (Summarization): Tổng hợp thông tin dài thành các ý chính rõ ràng.
+- Giải thích đa cấp độ (Explanation Skills): Phù hợp cho người mới bắt đầu (dùng ví dụ, so sánh) hoặc người có kinh nghiệm.
+- An toàn & Đạo đức: Tôn trọng người dùng, không tạo nội dung gây hại hoặc vi phạm pháp luật.
+
+QUY TẮC NGÔN NGỮ:
+- Tự động nhận diện ngôn ngữ của tin nhắn/câu hỏi từ người dùng. Nếu người dùng nhắn/hỏi bằng tiếng Việt, bạn BẮT BUỘC phải trả lời bằng tiếng Việt. Nếu người dùng nhắn/hỏi bằng tiếng Anh, bạn BẮT BUỘC phải trả lời bằng tiếng Anh.
+
+${historyPrompt}
+Tin nhắn hiện tại của người dùng: ${message}`;
+      const result = await generateContentStreamWithRetry(model, prompt);
       for await (const chunk of result.stream) {
         res.write(chunk.text());
       }
@@ -130,7 +185,7 @@ const triggerReanalyze = async (req, res) => {
 
 const triggerFolderChat = async (req, res) => {
   try {
-    const { folderId, question } = req.body;
+    const { folderId, question, chatId } = req.body;
     if (!folderId) return res.status(400).json({ error: 'Folder ID is required' });
     if (!question) return res.status(400).json({ error: 'Question is required' });
 
@@ -174,10 +229,11 @@ const triggerFolderChat = async (req, res) => {
     });
 
     const isPro = (await isUserPro(req.user.id)) || req.user.role === 'admin';
+    const historyPrompt = await getChatHistoryPrompt(chatId, req.user.id);
     // 4. Call answerQuestionStream
     await answerQuestionStream(aggregatedContext, question, (chunk) => {
       res.write(chunk);
-    }, isPro);
+    }, isPro, historyPrompt);
     res.end();
   } catch (error) {
     if (res.headersSent) {
