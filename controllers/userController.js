@@ -159,11 +159,24 @@ const restoreUser = async (req, res) => {
     if (dbError) throw dbError;
 
     // Delete restore request notifications for this user
-    await supabase
+    // Since user_id column may be missing in DB, we fetch and delete by ID
+    const { data: dbNotifs } = await supabase
       .from('notifications')
-      .delete()
-      .eq('type', 'user_restore_request')
-      .eq('user_id', userId);
+      .select('id, message')
+      .eq('type', 'user_restore_request');
+
+    if (dbNotifs && dbNotifs.length > 0) {
+      const notifIdsToDelete = dbNotifs
+        .filter(n => n.message && n.message.includes(`|||user_id:${userId}`))
+        .map(n => n.id);
+
+      if (notifIdsToDelete.length > 0) {
+        await supabase
+          .from('notifications')
+          .delete()
+          .in('id', notifIdsToDelete);
+      }
+    }
 
     // Save & Emit notification to user
     const { createNotification } = require('../services/notificationService');

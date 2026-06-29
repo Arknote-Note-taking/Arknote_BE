@@ -4,23 +4,43 @@ const apiKey = process.env.GEMINI_API_KEY;
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 const useMock = !genAI;
 
+const parseAiError = (err, defaultMsg) => {
+  const errMsg = err?.message || '';
+  const errDetails = err?.errorDetails ? JSON.stringify(err.errorDetails) : '';
+  const combined = (errMsg + ' ' + errDetails).toLowerCase();
+
+  const isQuota = err?.status === 429 ||
+    combined.includes('quota') ||
+    combined.includes('429') ||
+    combined.includes('limit') ||
+    combined.includes('exhausted') ||
+    combined.includes('rate_limit') ||
+    combined.includes('resource_exhausted');
+
+  if (isQuota) {
+    return 'Hết lượt dùng thử / Quota Exceeded. Vui lòng thử lại sau hoặc nâng cấp tài khoản.';
+  }
+
+  return `${defaultMsg} Chi tiết lỗi: ${err?.message || err}`;
+};
+
 const generateWithRetry = async (model, prompt, maxRetries = 5) => {
   let delay = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await model.generateContent(prompt);
     } catch (err) {
-      const isTransient = err.status === 503 || err.status === 429 || 
-                          (err.message && (
-                            err.message.includes('503') || 
-                            err.message.includes('429') || 
-                            err.message.includes('high demand') || 
-                            err.message.includes('overloaded') ||
-                            err.message.includes('Service Unavailable')
-                          ));
+      const isTransient = err.status === 503 || err.status === 429 ||
+        (err.message && (
+          err.message.includes('503') ||
+          err.message.includes('429') ||
+          err.message.includes('high demand') ||
+          err.message.includes('overloaded') ||
+          err.message.includes('Service Unavailable')
+        ));
       if (isTransient && i < maxRetries - 1) {
         let currentDelay = delay;
-        
+
         // Parse Google API rate limit retry delay if present in errorDetails
         if (err.errorDetails && Array.isArray(err.errorDetails)) {
           const retryInfo = err.errorDetails.find(
@@ -35,10 +55,10 @@ const generateWithRetry = async (model, prompt, maxRetries = 5) => {
             }
           }
         }
-        
+
         console.warn(`Transient Gemini error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying in ${currentDelay}ms...`);
         await new Promise(resolve => setTimeout(resolve, currentDelay));
-        
+
         // Update exponential backoff delay for subsequent retries if no RetryInfo is sent next time
         delay *= 2;
       } else {
@@ -54,17 +74,17 @@ const generateContentStreamWithRetry = async (model, prompt, maxRetries = 5) => 
     try {
       return await model.generateContentStream(prompt);
     } catch (err) {
-      const isTransient = err.status === 503 || err.status === 429 || 
-                          (err.message && (
-                            err.message.includes('503') || 
-                            err.message.includes('429') || 
-                            err.message.includes('high demand') || 
-                            err.message.includes('overloaded') ||
-                            err.message.includes('Service Unavailable')
-                          ));
+      const isTransient = err.status === 503 || err.status === 429 ||
+        (err.message && (
+          err.message.includes('503') ||
+          err.message.includes('429') ||
+          err.message.includes('high demand') ||
+          err.message.includes('overloaded') ||
+          err.message.includes('Service Unavailable')
+        ));
       if (isTransient && i < maxRetries - 1) {
         let currentDelay = delay;
-        
+
         // Parse Google API rate limit retry delay if present in errorDetails
         if (err.errorDetails && Array.isArray(err.errorDetails)) {
           const retryInfo = err.errorDetails.find(
@@ -78,7 +98,7 @@ const generateContentStreamWithRetry = async (model, prompt, maxRetries = 5) => 
             }
           }
         }
-        
+
         console.warn(`Transient Gemini Stream error (attempt ${i + 1}/${maxRetries}): ${err.message || err}. Retrying stream in ${currentDelay}ms...`);
         await new Promise(resolve => setTimeout(resolve, currentDelay));
         delay *= 2;
@@ -95,23 +115,25 @@ const extractMetadata = async (text, isPro = false) => {
       title: "Sample Document Title (Mocked)",
       subject: "Khác",
       tags: ["Gemini", "AI", "Mocked"],
-      summary: "- Đây là bản tóm tắt mẫu từ phân tích AI giả lập."
+      summary: "- Đây là bản tóm tắt mẫu từ phân tích AI giả lập.",
+      contract_expiry: "",
+      key_details: ""
     };
   }
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
           type: 'object',
           properties: {
-            title: { 
-              type: 'string', 
-              description: 'Tiêu đề ngắn gọn và chính xác của tài liệu bằng tiếng Việt' 
+            title: {
+              type: 'string',
+              description: 'Tiêu đề ngắn gọn và chính xác của tài liệu bằng tiếng Việt'
             },
-            subject: { 
+            subject: {
               type: 'string',
               enum: ['Nhân sự', 'Hành chính', 'Pháp luật', 'Học tập', 'Khác'],
               description: 'Danh mục chính của tài liệu'
@@ -124,9 +146,17 @@ const extractMetadata = async (text, isPro = false) => {
             summary: {
               type: 'string',
               description: 'Tóm tắt tài liệu thành các ý chính ngắn gọn dưới dạng gạch đầu dòng bằng tiếng Việt'
+            },
+            contract_expiry: {
+              type: 'string',
+              description: 'Nếu tài liệu là hợp đồng, thỏa thuận, hóa đơn hoặc văn bản có thời hạn: Trích xuất Ngày hết hạn/Thời hạn (ví dụ: "31/12/2026" hoặc "12 tháng"). Nếu không có hoặc không áp dụng, hãy trả về chuỗi rỗng "".'
+            },
+            key_details: {
+              type: 'string',
+              description: 'Nếu tài liệu liên quan đến Nhân sự, Hành chính hoặc Hợp đồng: Trích xuất các thông tin nhập liệu quan trọng khác (ví dụ: "Bên A: Công ty X, Bên B: Nguyễn Văn Y, Lương: 15tr"). Nếu không có hoặc không áp dụng, hãy trả về chuỗi rỗng "".'
             }
           },
-          required: ['title', 'subject', 'tags', 'summary']
+          required: ['title', 'subject', 'tags', 'summary', 'contract_expiry', 'key_details']
         },
         maxOutputTokens: 2048
       }
@@ -136,13 +166,29 @@ const extractMetadata = async (text, isPro = false) => {
     const prompt = `Phân tích đoạn văn bản dưới đây và trích xuất thông tin theo cấu trúc JSON được yêu cầu.
 Văn bản:
 ${text.substring(0, limit)}`;
-    
+
     const result = await generateWithRetry(model, prompt);
     const responseText = result.response.text();
-    return JSON.parse(responseText);
+    const metadata = JSON.parse(responseText);
+
+    // Format the summary if contract information is extracted
+    if ((metadata.contract_expiry && metadata.contract_expiry.trim() !== '') || (metadata.key_details && metadata.key_details.trim() !== '')) {
+      let prependText = '=========================================\n';
+      prependText += 'THÔNG TIN HỢP ĐỒNG & NHẬP LIỆU AI:\n';
+      if (metadata.contract_expiry && metadata.contract_expiry.trim() !== '') {
+        prependText += `Hạn hợp đồng / Hạn hiệu lực: ${metadata.contract_expiry.trim()}\n`;
+      }
+      if (metadata.key_details && metadata.key_details.trim() !== '') {
+        prependText += `Chi tiết chính: ${metadata.key_details.trim()}\n`;
+      }
+      prependText += '=========================================\n\n';
+      metadata.summary = prependText + (metadata.summary || '');
+    }
+
+    return metadata;
   } catch (err) {
     console.error('Error in Gemini extractMetadata:', err);
-    return { title: 'Unknown Document', subject: 'Khác', tags: [], summary: '' };
+    throw new Error(parseAiError(err, 'Không thể phân tích siêu dữ liệu từ tài liệu này.'));
   }
 };
 
@@ -152,38 +198,65 @@ const summarizeDocument = async (text, isPro = false) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const limit = isPro ? 80000 : 8000;
     const prompt = `Tóm tắt tài liệu sau thành các ý chính ngắn gọn dưới dạng gạch đầu dòng bằng tiếng Việt:\n\n${text.substring(0, limit)}`;
-    
+
     const result = await generateWithRetry(model, prompt);
     return result.response.text();
   } catch (err) {
     console.error('Error in Gemini summarizeDocument:', err);
-    return 'Không thể tạo tóm tắt do lỗi hệ thống AI.';
+    throw new Error(parseAiError(err, 'Không thể tạo tóm tắt do lỗi hệ thống AI.'));
   }
 };
 
-const answerQuestion = async (text, question, isPro = false) => {
+const answerQuestion = async (text, question, isPro = false, history = '') => {
   if (useMock) {
     return "Đây là câu trả lời giả lập. Vui lòng cấu hình GEMINI_API_KEY để AI phân tích tài liệu và trả lời thực tế câu hỏi của bạn.";
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const limit = isPro ? 100000 : 10000;
-    const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
+    const prompt = `Bạn là một trợ lý AI thông minh hỗ trợ phân tích và trả lời câu hỏi dựa trên tài liệu.
+Hãy tuân thủ các hướng dẫn, kỹ năng và quy tắc phản hồi sau đây:
+
+QUY TRÌNH PHẢN HỒI:
+1. Hiểu yêu cầu -> Xác định đúng mục tiêu, ý định của người dùng.
+2. Làm rõ (nếu cần) -> Hỏi thêm thông tin nếu yêu cầu mơ hồ hoặc thiếu thông tin, không tự suy diễn nếu có thể dẫn đến trả lời sai.
+3. Trả lời trực tiếp -> Đưa ra đáp án chính trước, tránh lan man.
+4. Giải thích -> Cung cấp lý do, ví dụ, hoặc hướng dẫn phù hợp với trình độ người dùng.
+5. Đề xuất tiếp theo -> Gợi ý các bước hoặc tài nguyên liên quan.
+
+CÁC KỸ NĂNG & QUY TẮC CỐT LÕI:
+- Lắng nghe và hiểu ý định (Intent Recognition): Nhận diện đúng mong muốn, hiểu ngữ cảnh, từ viết tắt, và lỗi chính tả.
+- Làm rõ khi thông tin chưa đủ (Clarification): Đặt câu hỏi bổ sung/hỏi ngược lại khi thông tin chưa đủ rõ ràng.
+- Phản hồi chính xác (Accuracy) & Trung thực: Đưa thông tin có căn cứ dựa trên tài liệu được cung cấp. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này (sử dụng ngôn ngữ phù hợp tương ứng theo quy tắc trên). Thừa nhận khi không biết/không làm được thay vì tự bịa.
+- Phản hồi thích ứng (Adaptive Response): Điều chỉnh độ dài ngắn/mức độ chi tiết theo nhu cầu (vd: người dùng muốn "chỉ đáp án" hoặc "giải thích chi tiết").
+- Đồng cảm (Empathy) & Giọng điệu (Tone): Thể hiện sự thấu hiểu khi người dùng gặp khó khăn, giữ giọng điệu lịch sự, khách quan, chuyên nghiệp, thân thiện, học thuật hoặc hài hước tùy hoàn cảnh.
+- Phản hồi có cấu trúc (Structured Response): Chia thành các tiêu đề, gạch đầu dòng, bảng biểu, danh sách cho dễ theo dõi.
+- Tập trung vào giải pháp (Solution-Oriented): Đề xuất cách khắc phục và các bước giải quyết từng bước cụ thể.
+- Xử lý phản hồi tiêu cực & Tiếp nhận lỗi (Error Recovery): Cởi mở tiếp nhận góp ý, xin lỗi và cập nhật thông tin chính xác nếu câu trả lời trước chưa đúng.
+- Chủ động gợi ý (Proactive Assistance): Đề xuất bước tiếp theo hoặc gợi ý các ví dụ/tài liệu liên quan.
+- Tóm tắt (Summarization): Tổng hợp thông tin dài thành các ý chính rõ ràng.
+- Giải thích đa cấp độ (Explanation Skills): Phù hợp cho người mới bắt đầu (dùng ví dụ, so sánh) hoặc người có kinh nghiệm.
+- An toàn & Đạo đức: Tôn trọng người dùng, không tạo nội dung gây hại hoặc vi phạm pháp luật.
+
+QUY TẮC NGÔN NGỮ:
+1. Hãy tự động nhận diện ngôn ngữ của câu hỏi từ người dùng. Nếu người dùng hỏi bằng tiếng Việt, bạn BẮT BUỘC phải trả lời bằng tiếng Việt. Nếu người dùng hỏi bằng tiếng Anh, bạn BẮT BUỘC phải trả lời bằng tiếng Anh.
+2. Đồng thời, hãy nhận diện ngôn ngữ của từng tài liệu trong ngữ cảnh được cung cấp bên dưới để hiểu và trích xuất thông tin một cách chính xác nhất theo đúng ngôn ngữ của tài liệu đó.
+3. Nếu câu hỏi không chỉ định rõ hoặc trung lập, hãy trả lời bằng ngôn ngữ khớp với ngôn ngữ chính của tài liệu.
 
 Ngữ cảnh tài liệu:
 ${text.substring(0, limit)}
-
-Câu hỏi: ${question}`;
+${history}
+Câu hỏi hiện tại của người dùng: ${question}`;
 
     const result = await generateWithRetry(model, prompt);
     return result.response.text();
   } catch (err) {
     console.error('Error in Gemini answerQuestion:', err);
-    return 'Lỗi: Không thể trả lời câu hỏi lúc này do sự cố kết nối với hệ thống AI.';
+    throw new Error(parseAiError(err, 'Lỗi: Không thể trả lời câu hỏi lúc này do sự cố kết nối với hệ thống AI.'));
   }
 };
 
@@ -210,7 +283,7 @@ const generateQuiz = async (text, isPro = true, count = 5) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -243,11 +316,11 @@ Tài liệu:\n\n${text.substring(0, limit)}`;
     return JSON.parse(responseText);
   } catch (err) {
     console.error('Error in Gemini generateQuiz:', err);
-    throw new Error('Không thể tạo quiz tự động từ tài liệu này.');
+    throw new Error(parseAiError(err, 'Không thể tạo quiz tự động từ tài liệu này.'));
   }
 };
 
-const answerQuestionStream = async (text, question, onChunk, isPro = false) => {
+const answerQuestionStream = async (text, question, onChunk, isPro = false, history = '') => {
   if (useMock) {
     const mockResponse = "Đây là câu trả lời giả lập. Vui lòng cấu hình GEMINI_API_KEY để AI phân tích tài liệu và trả lời thực tế câu hỏi của bạn.";
     const words = mockResponse.split(' ');
@@ -259,14 +332,41 @@ const answerQuestionStream = async (text, question, onChunk, isPro = false) => {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
     const limit = isPro ? 100000 : 10000;
-    const prompt = `Hãy trả lời câu hỏi của người dùng một cách chính xác dựa trên ngữ cảnh tài liệu được cung cấp dưới đây. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này.
+    const prompt = `Bạn là một trợ lý AI thông minh hỗ trợ phân tích và trả lời câu hỏi dựa trên tài liệu.
+Hãy tuân thủ các hướng dẫn, kỹ năng và quy tắc phản hồi sau đây:
+
+QUY TRÌNH PHẢN HỒI:
+1. Hiểu yêu cầu -> Xác định đúng mục tiêu, ý định của người dùng.
+2. Làm rõ (nếu cần) -> Hỏi thêm thông tin nếu yêu cầu mơ hồ hoặc thiếu thông tin, không tự suy diễn nếu có thể dẫn đến trả lời sai.
+3. Trả lời trực tiếp -> Đưa ra đáp án chính trước, tránh lan man.
+4. Giải thích -> Cung cấp lý do, ví dụ, hoặc hướng dẫn phù hợp với trình độ người dùng.
+5. Đề xuất tiếp theo -> Gợi ý các bước hoặc tài nguyên liên quan.
+
+CÁC KỸ NĂNG & QUY TẮC CỐT LÕI:
+- Lắng nghe và hiểu ý định (Intent Recognition): Nhận diện đúng mong muốn, hiểu ngữ cảnh, từ viết tắt, và lỗi chính tả.
+- Làm rõ khi thông tin chưa đủ (Clarification): Đặt câu hỏi bổ sung/hỏi ngược lại khi thông tin chưa đủ rõ ràng.
+- Phản hồi chính xác (Accuracy) & Trung thực: Đưa thông tin có căn cứ dựa trên tài liệu được cung cấp. Nếu thông tin không có trong tài liệu, hãy trả lời trung thực là tài liệu không đề cập đến thông tin này (sử dụng ngôn ngữ phù hợp tương ứng theo quy tắc trên). Thừa nhận khi không biết/không làm được thay vì tự bịa.
+- Phản hồi thích ứng (Adaptive Response): Điều chỉnh độ dài ngắn/mức độ chi tiết theo nhu cầu (vd: người dùng muốn "chỉ đáp án" hoặc "giải thích chi tiết").
+- Đồng cảm (Empathy) & Giọng điệu (Tone): Thể hiện sự thấu hiểu khi người dùng gặp khó khăn, giữ giọng điệu lịch sự, khách quan, chuyên nghiệp, thân thiện, học thuật hoặc hài hước tùy hoàn cảnh.
+- Phản hồi có cấu trúc (Structured Response): Chia thành các tiêu đề, gạch đầu dòng, bảng biểu, danh sách cho dễ theo dõi.
+- Tập trung vào giải pháp (Solution-Oriented): Đề xuất cách khắc phục và các bước giải quyết từng bước cụ thể.
+- Xử lý phản hồi tiêu cực & Tiếp nhận lỗi (Error Recovery): Cởi mở tiếp nhận góp ý, xin lỗi và cập nhật thông tin chính xác nếu câu trả lời trước chưa đúng.
+- Chủ động gợi ý (Proactive Assistance): Đề xuất bước tiếp theo hoặc gợi ý các ví dụ/tài liệu liên quan.
+- Tóm tắt (Summarization): Tổng hợp thông tin dài thành các ý chính rõ ràng.
+- Giải thích đa cấp độ (Explanation Skills): Phù hợp cho người mới bắt đầu (dùng ví dụ, so sánh) hoặc người có kinh nghiệm.
+- An toàn & Đạo đức: Tôn trọng người dùng, không tạo nội dung gây hại hoặc vi phạm pháp luật.
+
+QUY TẮC NGÔN NGỮ:
+1. Hãy tự động nhận diện ngôn ngữ của câu hỏi từ người dùng. Nếu người dùng hỏi bằng tiếng Việt, bạn BẮT BUỘC phải trả lời bằng tiếng Việt. Nếu người dùng hỏi bằng tiếng Anh, bạn BẮT BUỘC phải trả lời bằng tiếng Anh.
+2. Đồng thời, hãy nhận diện ngôn ngữ của từng tài liệu trong ngữ cảnh được cung cấp bên dưới để hiểu và trích xuất thông tin một cách chính xác nhất theo đúng ngôn ngữ của tài liệu đó.
+3. Nếu câu hỏi không chỉ định rõ hoặc trung lập, hãy trả lời bằng ngôn ngữ khớp với ngôn ngữ chính của tài liệu.
 
 Ngữ cảnh tài liệu:
 ${text.substring(0, limit)}
-
-Câu hỏi: ${question}`;
+${history}
+Câu hỏi hiện tại của người dùng: ${question}`;
 
     const result = await generateContentStreamWithRetry(model, prompt);
     for await (const chunk of result.stream) {
@@ -277,7 +377,7 @@ Câu hỏi: ${question}`;
     }
   } catch (err) {
     console.error('Error in Gemini answerQuestionStream:', err);
-    throw err;
+    throw new Error(parseAiError(err, 'Lỗi khi phát luồng câu trả lời.'));
   }
 };
 
@@ -297,7 +397,7 @@ const generateFlashcards = async (text, isPro = true, count = 10) => {
 
   try {
     const model = genAI.getGenerativeModel({
-      model: 'gemini-3-flash-preview',
+      model: 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -324,7 +424,7 @@ Tài liệu:\n\n${text.substring(0, limit)}`;
     return JSON.parse(responseText);
   } catch (err) {
     console.error('Error in Gemini generateFlashcards:', err);
-    throw new Error('Không thể tự động tạo bộ flashcard từ tài liệu này.');
+    throw new Error(parseAiError(err, 'Không thể tự động tạo bộ flashcard từ tài liệu này.'));
   }
 };
 

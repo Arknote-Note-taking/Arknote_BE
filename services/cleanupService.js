@@ -38,7 +38,12 @@ const runCleanupTask = async (io) => {
     const dbNotifDocIds = new Set();
     if (!notifError && dbNotifs) {
       dbNotifs.forEach(n => {
-        if (n.doc_id) dbNotifDocIds.add(n.doc_id);
+        if (n.doc_id) {
+          dbNotifDocIds.add(n.doc_id);
+        } else if (n.message && n.message.includes('|||doc_id:')) {
+          const docId = n.message.split('|||doc_id:')[1];
+          if (docId) dbNotifDocIds.add(docId);
+        }
       });
     }
     
@@ -113,19 +118,25 @@ const runCleanupTask = async (io) => {
         }
       }
       
-      // 3. Delete document record from database
-      const { error: deleteErr } = await supabase
+      // 3. Mark the document as purged and clear heavy content so it cannot be restored,
+      // but keep the database record so that it is still counted in the landing page stats.
+      const { error: updateErr } = await supabase
         .from('documents')
-        .delete()
+        .update({
+          file_url: null,
+          content: null,
+          summary: 'Tài liệu đã bị xóa vĩnh viễn sau 15 ngày.',
+          tags: []
+        })
         .eq('id', doc.id);
         
-      if (deleteErr) {
-        console.error(`[CleanupService] Failed to delete db record for document ${doc.id}:`, deleteErr);
+      if (updateErr) {
+        console.error(`[CleanupService] Failed to purge db record for document ${doc.id}:`, updateErr);
       } else {
-        console.log(`[CleanupService] Successfully deleted db record for document ${doc.id}`);
+        console.log(`[CleanupService] Successfully purged db record for document ${doc.id}`);
         purgedCount++;
         
-        // Emit socket deletion update
+        // Emit socket deletion update to active clients
         if (io) {
           io.emit('document_deleted', { id: doc.id });
         }

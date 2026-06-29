@@ -5,6 +5,9 @@ const { isUserPro } = require('./userController');
 // 1. Create custom deck
 const createDeck = async (req, res) => {
   try {
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Admin không thể tạo flashcard.' });
+    }
     const { title, description, documentId } = req.body;
     if (!title) return res.status(400).json({ error: 'Tiêu đề là bắt buộc' });
 
@@ -100,6 +103,9 @@ const getDeckById = async (req, res) => {
 // 4. Generate AI Flashcards
 const generateAiFlashcards = async (req, res) => {
   try {
+    if (req.user.role === 'admin') {
+      return res.status(403).json({ error: 'Admin không thể tạo flashcard.' });
+    }
     const { documentId, count } = req.body;
     console.log("SUPABASE_KEY inside controller:", process.env.SUPABASE_KEY ? process.env.SUPABASE_KEY.substring(0, 15) : 'undefined');
     if (!documentId) return res.status(400).json({ error: 'Mã tài liệu là bắt buộc' });

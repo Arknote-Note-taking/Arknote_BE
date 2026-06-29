@@ -11,8 +11,8 @@ const documents = [
   {
     title: 'Hợp đồng lao động mẫu',
     content: 'Mẫu hợp đồng lao động thời hạn 1 năm cho nhân sự mới.',
-    summary: 'Mẫu hợp đồng lao động chuẩn áp dụng cho nhân viên mới, bao gồm các điều khoản cơ bản và bảo mật.',
-    tags: ['hợp đồng', 'lao động', 'mẫu'],
+    summary: `=========================================\n📊 THÔNG TIN HỢP ĐỒNG & NHẬP LIỆU AI:\n📅 Hạn hợp đồng / Hạn hiệu lực: 1 năm (từ ngày ký)\n🔑 Chi tiết chính: Hợp đồng thử việc cho nhân viên chính thức\n=========================================\n\nMẫu hợp đồng lao động chuẩn áp dụng cho nhân viên mới, bao gồm các điều khoản cơ bản và bảo mật.`,
+    tags: ['hợp đồng', 'lao động', 'mẫu', 'Hạn: 1 năm'],
     subject: 'Nhân sự',
     fileUrl: '/uploads/mock_hop_dong.pdf',
     aiConfidence: 92

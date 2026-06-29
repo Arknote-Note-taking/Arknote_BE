@@ -17,8 +17,8 @@ const uploadDocument = async (req, res) => {
       if (req.file.path && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
-      return res.status(400).json({ 
-        error: `Kích thước tệp quá lớn (${(req.file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tệp tối đa của bạn là ${userPro || req.user.role === 'admin' ? '100MB' : '5MB'}. Vui lòng ${userPro || req.user.role === 'admin' ? 'nén tệp nhỏ hơn' : 'nâng cấp tài khoản PRO để tải lên tệp tối đa 100MB'}!` 
+      return res.status(400).json({
+        error: `Kích thước tệp quá lớn (${(req.file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tệp tối đa của bạn là ${userPro || req.user.role === 'admin' ? '100MB' : '5MB'}. Vui lòng ${userPro || req.user.role === 'admin' ? 'nén tệp nhỏ hơn' : 'nâng cấp tài khoản PRO để tải lên tệp tối đa 100MB'}!`
       });
     }
 
@@ -43,17 +43,14 @@ const uploadDocument = async (req, res) => {
 
     const filePath = req.file.path;
     const fileUrl = `/uploads/${req.file.filename}`;
-    
+
     let originalName = req.file.originalname;
     try {
       const fixedName = Buffer.from(originalName, 'latin1').toString('utf8');
       if (!fixedName.includes('\uFFFD')) {
         originalName = fixedName;
       }
-    } catch (e) {}
-    
-    // 1. Extract content OCR
-    const content = await extractTextFromFile(filePath, req.file.mimetype);
+    } catch (e) { }
 
     // Determine temporary subject if 'Auto' is selected
     let subjectVal = req.body.subject;
@@ -65,17 +62,17 @@ const uploadDocument = async (req, res) => {
       subjectVal = 'Khác';
     }
 
-    // 2. Save document to DB immediately (without waiting for AI)
+    // 1. Save document with pending text extraction placeholders to DB immediately
     const { data: doc, error } = await supabase
       .from('documents')
       .insert([{
         title: originalName,
-        content,
-        tags: ['Đang phân tích...'],
+        content: 'Đang trích xuất văn bản từ tệp...',
+        tags: ['Đang đọc tệp...'],
         subject: subjectVal,
         file_url: fileUrl,
         embedding: null,
-        summary: 'Đang tóm tắt bằng AI...',
+        summary: 'Đang trích xuất văn bản từ tệp...',
         user_id: req.user.id,
         folder_id: req.body.folder_id || null
       }])
@@ -83,19 +80,37 @@ const uploadDocument = async (req, res) => {
       .single();
 
     if (error) throw error;
-    
+
     // Add backward compatibility _id
     const responseDoc = { ...doc, _id: doc.id };
 
-    // 3. Emit socket for document creation and respond 201 immediately
+    // 2. Emit socket for document creation and respond 201 immediately
     req.io.emit('document_created', responseDoc);
     res.status(201).json(responseDoc);
 
-    // 4. Run AI processing in the background asynchronously
+    // 3. Run Text Extraction (OCR/PDF Parse) and AI processing in the background asynchronously
     (async () => {
       try {
-        console.log(`[AI-Background] Starting metadata & embedding extraction for document: ${doc.id}`);
-        
+        console.log(`[AI-Background] Starting background text extraction for document: ${doc.id}`);
+        const content = await extractTextFromFile(filePath, req.file.mimetype);
+
+        // Update database with content and shift status to AI analysis
+        const { data: docWithContent, error: contentErr } = await supabase
+          .from('documents')
+          .update({
+            content,
+            summary: 'Đang phân tích...',
+            tags: ['Đang phân tích...']
+          })
+          .eq('id', doc.id)
+          .select()
+          .single();
+
+        if (contentErr) throw contentErr;
+        req.io.emit('document_updated', { ...docWithContent, _id: docWithContent.id });
+
+        console.log(`[AI-Background] Text extracted successfully. Starting metadata & embedding extraction for document: ${doc.id}`);
+
         const isPro = userPro || req.user.role === 'admin';
         // Execute Gemini metadata extraction & Embedding creation in parallel
         const [metadata, rawEmbedding] = await Promise.all([
@@ -106,6 +121,9 @@ const uploadDocument = async (req, res) => {
         const summaryVal = metadata.summary || 'Không có bản tóm tắt.';
         const embeddingVal = JSON.stringify(rawEmbedding);
         const tagsVal = metadata.tags || [];
+        if (metadata.contract_expiry && metadata.contract_expiry.trim() !== '') {
+          tagsVal.push(`Hạn: ${metadata.contract_expiry.trim()}`);
+        }
 
         // Finalize subject if it was set to 'Auto'
         let finalSubject = req.body.subject;
@@ -132,21 +150,21 @@ const uploadDocument = async (req, res) => {
 
         if (updateErr) throw updateErr;
 
-        console.log(`[AI-Background] Successfully completed AI processing for document: ${doc.id}`);
+        console.log(`[AI-Background] Successfully completed background text extraction & AI processing for document: ${doc.id}`);
 
         // Emit document_updated event to all clients to refresh UI in real-time
         const responseUpdatedDoc = { ...updatedDoc, _id: updatedDoc.id };
         req.io.emit('document_updated', responseUpdatedDoc);
       } catch (bgError) {
-        console.error(`[AI-Background] Error in background AI processing for ${doc.id}:`, bgError);
-        
+        console.error(`[AI-Background] Error in background text/AI processing for ${doc.id}:`, bgError);
+
         // Gracefully set tags/summary to indicate failure instead of keeping loading state
         try {
           const { data: failedDoc } = await supabase
             .from('documents')
             .update({
               tags: ['Thất bại'],
-              summary: 'Không thể tóm tắt tài liệu do sự cố kết nối AI.',
+              summary: `Không thể xử lý tài liệu. Chi tiết: ${bgError.message || 'Lỗi hệ thống.'}`,
               subject: req.body.subject && req.body.subject.trim().toLowerCase() !== 'auto' ? req.body.subject : 'Khác'
             })
             .eq('id', doc.id)
@@ -180,7 +198,7 @@ const getDocuments = async (req, res) => {
     }
 
     let query = supabase.from('documents').select('id, title, summary, tags, subject, file_url, user_id, is_deleted, created_at, ai_confidence, folder_id').eq('is_deleted', false);
-    
+
     if (req.user.role !== 'admin') {
       if (sharedFolderIds.length > 0) {
         query = query.or(`user_id.eq.${req.user.id},folder_id.in.(${sharedFolderIds.map(id => `"${id}"`).join(',')})`);
@@ -188,10 +206,10 @@ const getDocuments = async (req, res) => {
         query = query.eq('user_id', req.user.id);
       }
     }
-    
+
     const { data: docs, error } = await query;
     if (error) throw error;
-    
+
     // Fetch user-specific pins from document_annotations
     const { data: pins } = await supabase
       .from('document_annotations')
@@ -234,11 +252,11 @@ const getDocumentById = async (req, res) => {
     if (error) throw error;
     if (!doc) return res.status(404).json({ error: 'Not found' });
     if (doc.is_deleted) return res.status(404).json({ error: 'Deleted' });
-    
+
     if (req.user.role === 'admin') {
       return res.status(403).json({ error: 'Admin chỉ quản lý tài liệu, không thể xem chi tiết nội dung tài liệu.' });
     }
-    
+
     let hasAccess = false;
     let canEdit = false;
     if (doc.user_id === req.user.id) {
@@ -269,7 +287,7 @@ const getDocumentById = async (req, res) => {
       .eq('user_id', req.user.id)
       .eq('selected_text', '__PIN__')
       .maybeSingle();
-    
+
     res.status(200).json({ ...doc, _id: doc.id, canEdit, is_pinned: !!pin });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -280,7 +298,7 @@ const updateDocument = async (req, res) => {
   try {
     const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, is_deleted, folder_id').eq('id', req.params.id).single();
     if (checkErr || !docCheck || docCheck.is_deleted) return res.status(404).json({ error: 'Not found' });
-    
+
     let canUpdate = false;
     if (docCheck.user_id === req.user.id || req.user.role === 'admin') {
       canUpdate = true;
@@ -304,7 +322,7 @@ const updateDocument = async (req, res) => {
     if (req.body.hasOwnProperty('is_pinned')) {
       isPinnedUpdated = true;
       newPinState = req.body.is_pinned;
-      
+
       if (newPinState) {
         // Create user pin annotation
         await supabase
@@ -325,7 +343,7 @@ const updateDocument = async (req, res) => {
           .eq('user_id', req.user.id)
           .eq('selected_text', '__PIN__');
       }
-      
+
       // Delete is_pinned so it doesn't modify the shared/global documents table column
       delete req.body.is_pinned;
     }
@@ -361,7 +379,7 @@ const updateDocument = async (req, res) => {
         .maybeSingle();
       finalPinState = !!pin;
     }
-    
+
     const responseDoc = { ...updatedDoc, _id: updatedDoc.id, is_pinned: finalPinState };
     req.io.emit('document_updated', responseDoc);
     res.status(200).json(responseDoc);
@@ -374,16 +392,16 @@ const deleteDocument = async (req, res) => {
   try {
     const { data: docCheck, error: checkErr } = await supabase.from('documents').select('id, user_id, title').eq('id', req.params.id).single();
     if (checkErr || !docCheck) return res.status(404).json({ error: 'Not found' });
-    
+
     if (req.user.role !== 'admin' && docCheck.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
     const { error } = await supabase.from('documents').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', req.params.id);
     if (error) throw error;
-    
+
     req.io.emit('document_deleted', { id: req.params.id }); // Use standard id field
-    
+
     // Notify user if admin deleted their document
     if (req.user.role === 'admin' && docCheck.user_id !== req.user.id) {
       try {
@@ -410,7 +428,7 @@ const getDeletedDocuments = async (req, res) => {
   try {
     let query = supabase
       .from('documents')
-      .select('id, title, summary, tags, subject, file_url, user_id, created_at')
+      .select('id, title, summary, tags, subject, file_url, user_id, created_at, deleted_at')
       .eq('is_deleted', true);
 
     if (req.user.role !== 'admin') {
@@ -419,7 +437,7 @@ const getDeletedDocuments = async (req, res) => {
 
     const { data: docs, error } = await query;
     if (error) throw error;
-    
+
     // Fetch active restore request notifications from DB using message field since doc_id column may be missing
     const { data: notifications } = await supabase
       .from('notifications')
@@ -457,9 +475,19 @@ const getDeletedDocuments = async (req, res) => {
     if (!userErr && users) {
       users.forEach(u => { userMap[u.id] = u.email; });
     }
-    
-    let formatted = docs.map(d => ({ 
-      ...d, 
+
+    // Filter out documents older than 15 days that have no active restore request
+    const fifteenDaysAgoLimit = Date.now() - 15 * 24 * 60 * 60 * 1000;
+    const activeDocs = docs.filter(d => {
+      if (requestedDocIds.has(d.id)) return true;
+      const delTimeStr = d.deleted_at || d.created_at;
+      if (!delTimeStr) return false;
+      const delDate = new Date(delTimeStr);
+      return delDate.getTime() >= fifteenDaysAgoLimit;
+    });
+
+    let formatted = activeDocs.map(d => ({
+      ...d,
       _id: d.id,
       user_email: userMap[d.user_id] || 'Unknown',
       restore_requested: requestedDocIds.has(d.id)
@@ -490,10 +518,10 @@ const restoreDocument = async (req, res) => {
       console.log('[Restore-Debug] Access forbidden: User role is not admin');
       return res.status(403).json({ error: 'Access forbidden' });
     }
-    // Retrieve doc to get title and owner user_id
+    // Retrieve doc to get title, owner user_id, and check if it's already purged
     const { data: docToCheck, error: checkError } = await supabase
       .from('documents')
-      .select('id, title, user_id')
+      .select('id, title, user_id, file_url, content')
       .eq('id', req.params.id)
       .single();
 
@@ -501,40 +529,52 @@ const restoreDocument = async (req, res) => {
       return res.status(404).json({ error: 'Không tìm thấy tài liệu.' });
     }
 
-    // Check if there is an active document with the same title for the user
-    const { data: activeDocs, error: activeError } = await supabase
-      .from('documents')
-      .select('id')
-      .eq('user_id', docToCheck.user_id)
-      .eq('is_deleted', false)
-      .eq('title', docToCheck.title);
-
-    if (activeError) throw activeError;
-    if (activeDocs && activeDocs.length > 0) {
-      return res.status(400).json({ error: `Tài liệu "${docToCheck.title}" đã tồn tại trong danh sách tài liệu hoạt động của người dùng.` });
+    // Safety check: if physical fields are cleared, the document has been permanently deleted
+    if (!docToCheck.file_url && !docToCheck.content) {
+      return res.status(400).json({ error: 'Tài liệu này đã bị xóa vĩnh viễn sau 15 ngày và không thể khôi phục.' });
     }
+
+    // Strip " (Khôi phục)" or "(Khôi phục)" from the title if present
+    const finalTitle = docToCheck.title.replace(/\s*\(Khôi phục\)/g, '');
 
     const { data: doc, error } = await supabase
       .from('documents')
-      .update({ is_deleted: false, deleted_at: null })
+      .update({
+        title: finalTitle,
+        is_deleted: false,
+        deleted_at: null
+      })
       .eq('id', req.params.id)
       .select()
       .single();
     if (error) throw error;
 
     // Delete active restore request notifications for this document from DB
-    await supabase
+    // Since doc_id column may be missing in DB, we fetch and delete by ID
+    const { data: dbNotifs } = await supabase
       .from('notifications')
-      .delete()
-      .eq('type', 'document_restore_request')
-      .eq('doc_id', req.params.id);
+      .select('id, message')
+      .eq('type', 'document_restore_request');
+
+    if (dbNotifs && dbNotifs.length > 0) {
+      const notifIdsToDelete = dbNotifs
+        .filter(n => n.message && n.message.includes(`|||doc_id:${req.params.id}`))
+        .map(n => n.id);
+
+      if (notifIdsToDelete.length > 0) {
+        await supabase
+          .from('notifications')
+          .delete()
+          .in('id', notifIdsToDelete);
+      }
+    }
 
     // Delete matching local notifications
     const { readLocalNotifications, writeLocalNotifications } = require('../services/notificationStorage');
     const localNotifs = readLocalNotifications();
     const updatedNotifs = localNotifs.filter(n => !(n.type === 'document_restore_request' && n.doc_id === req.params.id));
     writeLocalNotifications(updatedNotifs);
-    
+
     const responseDoc = { ...doc, _id: doc.id };
     req.io.emit('document_created', responseDoc);
 
@@ -562,24 +602,14 @@ const requestRestoreDocument = async (req, res) => {
       .select('id, title, user_id')
       .eq('id', req.params.id)
       .single();
-      
+
     if (error || !doc) {
       console.error('[Socket-Debug] Document not found:', error);
       return res.status(404).json({ error: 'Không tìm thấy tài liệu.' });
     }
 
     // Check if there is an active document with the same title for the user
-    const { data: activeDocs, error: activeError } = await supabase
-      .from('documents')
-      .select('id')
-      .eq('user_id', doc.user_id)
-      .eq('is_deleted', false)
-      .eq('title', doc.title);
-
-    if (activeError) throw activeError;
-    if (activeDocs && activeDocs.length > 0) {
-      return res.status(400).json({ error: `Tài liệu "${doc.title}" đã tồn tại trong tài liệu hiện tại của bạn. Không cần khôi phục!` });
-    }
+    // We do not block the request here anymore, as the restoration step will automatically append a suffix if needed.
 
     // Save & Emit notification to admin
     console.log('[Socket-Debug] Emitting admin_notification for:', doc.title, 'from user:', req.user.email);
@@ -591,7 +621,7 @@ const requestRestoreDocument = async (req, res) => {
       message: `Tài liệu: ${doc.title} (Yêu cầu từ: ${req.user.email}) |||doc_id:${doc.id}`,
       docId: doc.id
     });
-    
+
     res.status(200).json({ message: 'Đã gửi yêu cầu khôi phục tài liệu tới Admin.' });
   } catch (error) {
     console.error('[Socket-Debug] requestRestoreDocument Exception:', error);
@@ -602,34 +632,34 @@ const requestRestoreDocument = async (req, res) => {
 const getDashboardStats = async (req, res) => {
   try {
     let query = supabase.from('documents').select('id, title, created_at, subject, ai_confidence, summary').eq('is_deleted', false);
-    
+
     if (req.user.role !== 'admin') {
       query = query.eq('user_id', req.user.id);
     }
-    
+
     const { data: allUserDocs, error } = await query;
     if (error) throw error;
-    
+
     console.log(`[getDashboardStats] User: ${req.user.email}, Role: ${req.user.role}, Docs found: ${allUserDocs ? allUserDocs.length : 0}`);
-    
+
     const totalDocs = allUserDocs.length;
     const processedDocs = allUserDocs.filter(d => d.summary && d.summary.trim() !== '').length;
     const pendingDocs = totalDocs - processedDocs;
-    
+
     let totalConfidence = 0;
     const subjectMap = {};
-    
+
     allUserDocs.forEach(doc => {
-       totalConfidence += (doc.ai_confidence || 95);
-       const sub = doc.subject || 'Khác';
-       subjectMap[sub] = (subjectMap[sub] || 0) + 1;
+      totalConfidence += (doc.ai_confidence || 95);
+      const sub = doc.subject || 'Khác';
+      subjectMap[sub] = (subjectMap[sub] || 0) + 1;
     });
-    
+
     const avgConfidence = totalDocs > 0 ? Math.round(totalConfidence / totalDocs) : 0;
     const subjectStats = Object.keys(subjectMap)
       .map(sub => ({ subject: sub, count: subjectMap[sub] }))
-      .sort((a,b) => b.count - a.count);
-    
+      .sort((a, b) => b.count - a.count);
+
     // Sort array in memory for recentDocs since we just fetched all
     const recentDocs = [...allUserDocs]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
