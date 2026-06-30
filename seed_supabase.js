@@ -98,7 +98,7 @@ async function seedDatabase() {
           role: u.role,
           is_pro: u.is_pro,
           pro_expires_at: expiresAt,
-          ai_credits_remaining: u.is_pro ? 500 : 30,
+          ai_credits_remaining: u.is_pro ? 100 : 30,
           has_password: true,
           onboarding_completed: true,
           is_deleted: false

@@ -24,20 +24,75 @@ const parseAiError = (err, defaultMsg) => {
   return `${defaultMsg} Chi tiết lỗi: ${err?.message || err}`;
 };
 
+const safeJsonParse = (str) => {
+  if (!str) return null;
+  let cleaned = str.trim();
+
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\n?/i, '');
+    cleaned = cleaned.replace(/\n?```$/, '');
+    cleaned = cleaned.trim();
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    console.error('Failed to parse raw JSON from Gemini. Raw text was:', str);
+    try {
+      let regexCleaned = cleaned
+        .replace(/,\s*([\]}])/g, '$1') // remove trailing comma before } or ]
+        .replace(/[\u200B-\u200D\uFEFF]/g, ''); // remove zero-width spaces/invisible characters
+      return JSON.parse(regexCleaned);
+    } catch (innerErr) {
+      // If it still fails, let's attempt to repair a truncated JSON array of objects
+      if (cleaned.startsWith('[')) {
+        console.warn('Attempting to repair truncated JSON array...');
+        let temp = cleaned;
+        let lastCurly = temp.lastIndexOf('}');
+        while (lastCurly !== -1) {
+          temp = temp.substring(0, lastCurly + 1);
+          try {
+            let candidate = temp.trim();
+            if (candidate.endsWith(',')) {
+              candidate = candidate.slice(0, -1).trim();
+            }
+            candidate += '\n]';
+            const parsed = JSON.parse(candidate);
+            console.log(`Successfully recovered truncated JSON with ${parsed.length} items.`);
+            return parsed;
+          } catch (e) {
+            temp = temp.substring(0, lastCurly);
+            lastCurly = temp.lastIndexOf('}');
+          }
+        }
+      }
+      console.error('Inner cleanup parse failed:', innerErr);
+      throw err;
+    }
+  }
+};
+
 const generateWithRetry = async (model, prompt, maxRetries = 5) => {
   let delay = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await model.generateContent(prompt);
     } catch (err) {
-      const isTransient = err.status === 503 || err.status === 429 ||
+      const errMsgStr = (err.message || '').toLowerCase();
+      const isDailyOrPermanentQuota = errMsgStr.includes('daily') || 
+        errMsgStr.includes('quota exceeded') || 
+        errMsgStr.includes('budget');
+
+      const isTransient = !isDailyOrPermanentQuota && (
+        err.status === 503 || err.status === 429 ||
         (err.message && (
           err.message.includes('503') ||
           err.message.includes('429') ||
           err.message.includes('high demand') ||
           err.message.includes('overloaded') ||
           err.message.includes('Service Unavailable')
-        ));
+        ))
+      );
       if (isTransient && i < maxRetries - 1) {
         let currentDelay = delay;
 
@@ -74,14 +129,21 @@ const generateContentStreamWithRetry = async (model, prompt, maxRetries = 5) => 
     try {
       return await model.generateContentStream(prompt);
     } catch (err) {
-      const isTransient = err.status === 503 || err.status === 429 ||
+      const errMsgStr = (err.message || '').toLowerCase();
+      const isDailyOrPermanentQuota = errMsgStr.includes('daily') || 
+        errMsgStr.includes('quota exceeded') || 
+        errMsgStr.includes('budget');
+
+      const isTransient = !isDailyOrPermanentQuota && (
+        err.status === 503 || err.status === 429 ||
         (err.message && (
           err.message.includes('503') ||
           err.message.includes('429') ||
           err.message.includes('high demand') ||
           err.message.includes('overloaded') ||
           err.message.includes('Service Unavailable')
-        ));
+        ))
+      );
       if (isTransient && i < maxRetries - 1) {
         let currentDelay = delay;
 
@@ -291,14 +353,26 @@ const generateQuiz = async (text, isPro = true, count = 5) => {
           items: {
             type: 'object',
             properties: {
-              question: { type: 'string', description: 'Nội dung câu hỏi trắc nghiệm' },
+              question: { 
+                type: 'string', 
+                description: 'Nội dung câu hỏi trắc nghiệm viết hoàn toàn bằng ngôn ngữ chính của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bản dịch tiếng Việt, không chứa giải thích hay phiên âm/Romaji.' 
+              },
               options: {
                 type: 'array',
-                items: { type: 'string' },
-                description: '4 đáp án lựa chọn (A, B, C, D)'
+                items: { 
+                  type: 'string',
+                  description: 'Một phương án lựa chọn viết HOÀN TOÀN bằng ngôn ngữ gốc của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bất kỳ nghĩa dịch tiếng Việt, giải thích hay Romaji/phiên âm nào trong chuỗi này.'
+                },
+                description: '4 đáp án lựa chọn (A, B, C, D) viết hoàn toàn bằng ngôn ngữ chính của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bản dịch tiếng Việt, không chứa giải thích hay phiên âm/Romaji.'
               },
-              answer: { type: 'string', description: 'Đáp án đúng (phải trùng khớp hoàn toàn với một trong bốn chuỗi ký tự trong options)' },
-              explanation: { type: 'string', description: 'Giải thích chi tiết tại sao đáp án đó đúng bằng tiếng Việt' }
+              answer: { 
+                type: 'string', 
+                description: 'Đáp án đúng (phải trùng khớp hoàn toàn với một trong bốn chuỗi ký tự trong options, viết hoàn toàn bằng ngôn ngữ chính của tài liệu).' 
+              },
+              explanation: { 
+                type: 'string', 
+                description: 'Giải thích chi tiết tại sao đáp án đó đúng bằng tiếng Việt (BẮT BUỘC bao gồm cả bản dịch tiếng Việt, phiên âm/cách phát âm/Romaji của câu hỏi và các đáp án để người học đối chiếu học tập sau khi nộp bài).' 
+              }
             },
             required: ['question', 'options', 'answer', 'explanation']
           }
@@ -307,13 +381,42 @@ const generateQuiz = async (text, isPro = true, count = 5) => {
       }
     });
 
-    const limit = isPro ? 80000 : 8000;
-    const prompt = `Tạo một bộ câu hỏi trắc nghiệm (quiz) gồm đúng ${questionCount} câu hỏi dựa trên nội dung tài liệu sau. Mỗi câu hỏi phải có 4 đáp án lựa chọn (A, B, C, D), chỉ rõ đáp án đúng và kèm giải thích chi tiết tại sao đúng bằng tiếng Việt.
+    const limit = isPro ? 20000 : 8000;
+    const prompt = `Tạo một bộ câu hỏi trắc nghiệm (quiz) gồm đúng ${questionCount} câu hỏi dựa trên nội dung tài liệu sau.
+Yêu cầu về tư duy sư phạm và thiết lập câu hỏi linh hoạt:
+- KHÔNG TRÍCH XUẤT THỤ ĐỘNG: Không đơn thuần là copy nguyên mẫu từ tài liệu hoặc dịch từng từ thô cứng. Bạn cần xây dựng câu hỏi thông minh, thực tế, kích thích tư duy phản xạ giao tiếp.
+- THIẾT LẬP CÂU HỎI VÀ ĐÁP ÁN: Nếu tài liệu chứa các mẫu câu hỏi, hội thoại hoặc cấu trúc giao tiếp (ví dụ: "日本りょうり は どうですか？"), hãy sử dụng câu hỏi đó làm câu hỏi trắc nghiệm, và xây dựng đáp án đúng là một câu phản hồi hợp lý, tự nhiên nhất dựa trên ngữ cảnh tài liệu (ví dụ: "美味しいですが、値段が高いです").
+- TẠO ĐÁP ÁN NHIỄU (DISTRACTORS): Ngoài 1 đáp án đúng hoàn toàn nói trên, bạn phải tự suy nghĩ và tạo ra 3 đáp án sai (nhiễu) còn lại. Các đáp án nhiễu này phải là các câu trả lời không phù hợp về mặt ý nghĩa, sai cấu trúc ngữ pháp, hoặc không ăn nhập gì với ngữ cảnh câu hỏi để thử thách khả năng chọn lựa của người học.
+
+Yêu cầu cực kỳ quan trọng về Ngôn ngữ và Dịch nghĩa/Giải thích:
+1. Hãy tự động nhận diện ngôn ngữ chính của tài liệu.
+2. Nếu tài liệu bằng tiếng nước ngoài hoặc là tài liệu học ngoại ngữ (ví dụ: tiếng Nhật, tiếng Trung, tiếng Hàn, tiếng Anh, v.v.):
+   - Câu hỏi (question) và các đáp án lựa chọn (options) BẮT BUỘC phải viết 100% bằng chính ngôn ngữ nước ngoài đó (ví dụ: tiếng Nhật). TUYỆT ĐỐI CẤM dịch nghĩa tiếng Việt, cấm giải thích hay ghi phiên âm/Romaji/cách đọc ở trong trường question và options.
+   - Bản dịch tiếng Việt, phiên âm/cách phát âm/Romaji/Furigana, và giải thích chi tiết tại sao đúng/sai BẮT BUỘC chỉ được đưa vào trường giải thích (explanation). Trường explanation sẽ hiển thị sau khi người dùng nộp bài để họ đối chiếu và học tập.
+
+Ví dụ cụ thể về cách định dạng trường dữ liệu:
+[ĐÚNG HỢP LỆ]:
+- question: "きょうとは どうですか？"
+- options: ["きれいです。", "おいしいですが、ねだんがたかいです。", "きれいだし、たかいです。", "きれいだし、ゆうめいです。"] (Chú ý: Tất cả các phương án đều viết bằng tiếng Nhật thuần túy, không có chứa bản dịch tiếng Việt hay phiên âm đính kèm).
+- explanation: "きょうとは どうですか？ (Kyoto thế nào?) -> Đáp án đúng: きれいです (Đẹp). Câu này đọc là: Kirei desu. Nghĩa: Đẹp..."
+
+[SAI CẤM SỬ DỤNG]:
+- options: ["きれいです。 (Kirei desu) / Đẹp nhưng không yên tĩnh.", "おいしいですが... / Ngon nhưng giá đắt."] (Lỗi vì chứa dịch nghĩa tiếng Việt và cách phát âm ngay trong các đáp án lựa chọn).
+
+3. Nếu tài liệu bằng tiếng Việt: Câu hỏi, các đáp án lựa chọn (options), đáp án đúng (answer) và giải thích (explanation) đều viết bằng tiếng Việt.
+
+Mỗi câu hỏi phải có đúng 4 đáp án lựa chọn (A, B, C, D) và chỉ rõ đáp án đúng (phải trùng khớp hoàn toàn với một trong bốn chuỗi ký tự trong options).
+
+ĐẶC BIỆT LƯU Ý VỀ ĐỊNH DẠNG JSON:
+- Phải đảm bảo trả về định dạng JSON hợp lệ tuyệt đối, khớp với schema đã cho.
+- Không được chứa các ký tự xuống dòng (newline) trực tiếp trong các chuỗi ký tự JSON. Tất cả các dấu xuống dòng (nếu có) phải được viết dưới dạng \\n.
+- Tất cả dấu nháy kép bên trong giá trị chuỗi phải được escape bằng dấu gạch chéo ngược (ví dụ: \\\").
+
 Tài liệu:\n\n${text.substring(0, limit)}`;
 
     const result = await generateWithRetry(model, prompt);
     const responseText = result.response.text();
-    return JSON.parse(responseText);
+    return safeJsonParse(responseText);
   } catch (err) {
     console.error('Error in Gemini generateQuiz:', err);
     throw new Error(parseAiError(err, 'Không thể tạo quiz tự động từ tài liệu này.'));
@@ -415,13 +518,32 @@ const generateFlashcards = async (text, isPro = true, count = 10) => {
       }
     });
 
-    const limit = isPro ? 80000 : 8000;
-    const prompt = `Tạo một bộ thẻ ghi nhớ (flashcard) gồm đúng ${cardCount} thẻ dựa trên nội dung tài liệu sau. Mỗi thẻ gồm mặt trước (front_text) là câu hỏi ngắn hoặc khái niệm, mặt sau (back_text) là câu trả lời ngắn gọn hoặc định nghĩa bằng tiếng Việt.
+    const limit = isPro ? 20000 : 8000;
+    const prompt = `Tạo một bộ thẻ ghi nhớ (flashcard) gồm đúng ${cardCount} thẻ dựa trên nội dung tài liệu sau.
+Yêu cầu về tư duy sư phạm và thiết lập thẻ ghi nhớ linh hoạt:
+- KHÔNG TRÍCH XUẤT THỤ ĐỘNG: Đừng chỉ sao chép hoặc dịch nghĩa thô cứng từng từ một.
+- TẠO PHẢN XẠ GIAO TIẾP: Đối với các mẫu câu, hội thoại hoặc câu hỏi xuất hiện trong tài liệu (ví dụ: "日本りょうり は どうですか？"):
+  + Mặt trước (front_text) phải là câu hỏi hoặc tình huống giao tiếp viết bằng chính ngôn ngữ nước ngoài đó (ví dụ: "日本りょうり は どうですか？").
+  + Mặt sau (back_text) phải là câu trả lời giao tiếp hợp lý, tự nhiên nhất bằng ngôn ngữ đó (ví dụ: "美味しいですが、値段が高いです") kèm theo cách phát âm/cách đọc và nghĩa tiếng Việt tương ứng để người học vừa ghi nhớ từ vựng vừa luyện phản xạ giao tiếp.
+
+Yêu cầu về ngôn ngữ và nội dung thẻ ghi nhớ:
+1. Hãy tự động nhận diện ngôn ngữ chính của tài liệu.
+2. Nếu tài liệu bằng tiếng Việt: Mặt trước (front_text) là câu hỏi ngắn hoặc khái niệm bằng tiếng Việt, mặt sau (back_text) là câu trả lời ngắn gọn hoặc định nghĩa bằng tiếng Việt.
+3. Nếu tài liệu bằng tiếng nước ngoài hoặc là tài liệu học ngoại ngữ (ví dụ: tiếng Nhật, tiếng Trung, tiếng Hàn, tiếng Anh, v.v.):
+   - Các thẻ ghi nhớ phải được thiết kế để giúp người ôn tập học và luyện tập ngôn ngữ đó. Không dịch toàn bộ câu chữ sang tiếng Việt ở cả hai mặt.
+   - Mặt trước (front_text) phải chứa từ vựng, mẫu ngữ pháp, cụm từ, câu ví dụ hoặc câu hỏi giao tiếp viết bằng chính ngôn ngữ nước ngoài đó (ví dụ: tiếng Nhật).
+   - Mặt sau (back_text) phải chứa nghĩa tiếng Việt, cách phát âm/phiên âm/cách đọc (như Romaji/Furigana cho tiếng Nhật, Pinyin cho tiếng Trung nếu có), và lời giải nghĩa hoặc câu trả lời tự nhiên bằng ngôn ngữ gốc kèm tiếng Việt để hỗ trợ học tập hiệu quả.
+
+ĐẶC BIỆT LƯU Ý VỀ ĐỊNH DẠNG JSON:
+- Phải đảm bảo trả về định dạng JSON hợp lệ tuyệt đối, khớp với schema đã cho.
+- Không được chứa các ký tự xuống dòng (newline) trực tiếp trong các chuỗi ký tự JSON. Tất cả các dấu xuống dòng (nếu có) phải được viết dưới dạng \\n.
+- Tất cả dấu nháy kép bên trong giá trị chuỗi phải được escape bằng dấu gạch chéo ngược (ví dụ: \\\").
+
 Tài liệu:\n\n${text.substring(0, limit)}`;
 
     const result = await generateWithRetry(model, prompt);
     const responseText = result.response.text();
-    return JSON.parse(responseText);
+    return safeJsonParse(responseText);
   } catch (err) {
     console.error('Error in Gemini generateFlashcards:', err);
     throw new Error(parseAiError(err, 'Không thể tự động tạo bộ flashcard từ tài liệu này.'));

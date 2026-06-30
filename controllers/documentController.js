@@ -2,6 +2,7 @@ const supabase = require('../config/supabaseClient');
 const { extractTextFromFile } = require('../services/fileExtractionService');
 const { extractMetadata, summarizeDocument } = require('../services/aiService');
 const { createEmbedding, cosineSimilarity } = require('../services/embeddingService');
+const { storeChunks } = require('../services/ragService');
 const { isUserPro } = require('./userController');
 const path = require('path');
 const fs = require('fs');
@@ -155,6 +156,11 @@ const uploadDocument = async (req, res) => {
         // Emit document_updated event to all clients to refresh UI in real-time
         const responseUpdatedDoc = { ...updatedDoc, _id: updatedDoc.id };
         req.io.emit('document_updated', responseUpdatedDoc);
+
+        // Store RAG chunks in background (non-blocking) — enables semantic search for Quiz/Flashcard generation
+        storeChunks(doc.id, req.user.id, content).catch(chunkErr => {
+          console.warn(`[RAG] Background chunk storage failed for doc ${doc.id}:`, chunkErr.message);
+        });
       } catch (bgError) {
         console.error(`[AI-Background] Error in background text/AI processing for ${doc.id}:`, bgError);
 

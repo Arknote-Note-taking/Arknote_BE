@@ -17,6 +17,7 @@ const flashcardRoutes = require('./routes/flashcards');
 const shareRoutes = require('./routes/shares');
 const annotationRoutes = require('./routes/annotations');
 const publicRoutes = require('./routes/public');
+const jobRoutes = require('./routes/jobs');
 
 const app = express();
 const server = http.createServer(app);
@@ -59,6 +60,7 @@ app.use('/api/flashcards', flashcardRoutes);
 app.use('/api/shares', shareRoutes);
 app.use('/api/annotations', annotationRoutes);
 app.use('/api/public', publicRoutes);
+app.use('/api/jobs', jobRoutes);
 
 
 // Socket connection
@@ -91,4 +93,8 @@ server.listen(process.env.PORT, () => {
   // Start automatic document cleanup background service
   const { startCleanupInterval } = require('./services/cleanupService');
   startCleanupInterval(io);
+
+  // Start BullMQ AI Worker (requires Upstash Redis via UPSTASH_REDIS_URL)
+  const { startWorker } = require('./workers/aiWorker');
+  startWorker(io);
 });
