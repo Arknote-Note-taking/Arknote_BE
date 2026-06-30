@@ -1,6 +1,8 @@
 const supabase = require('../config/supabaseClient');
 const { summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, extractMetadata, generateQuiz } = require('../services/aiService');
 const { isUserPro } = require('./userController');
+const { retrieveRelevantChunks } = require('../services/ragService');
+const { enqueueAiJob } = require('../services/jobQueue');
 
 const getChatHistoryPrompt = async (chatId, userId) => {
   if (!chatId) return '';
@@ -271,17 +273,45 @@ const triggerQuiz = async (req, res) => {
     }
 
     const isPro = userPro || req.user.role === 'admin';
-    const quizQuestions = await generateQuiz(doc.content, isPro, count ? parseInt(count, 10) : 5);
-
-    // Save quiz to Supabase (check if it already exists)
     const quizTitle = doc.title;
 
+    // Check cache: if quiz already exists and contains questions, return it directly unless forceRegenerate is requested
     const { data: existingQuizzes, error: selectErr } = await supabase
       .from('quizzes')
       .select('*')
       .eq('user_id', req.user.id)
       .eq('document_id', documentId)
       .eq('title', quizTitle);
+
+    if (!selectErr && existingQuizzes && existingQuizzes.length > 0 && !req.body.forceRegenerate) {
+      const targetQuiz = existingQuizzes[0];
+      if (targetQuiz.questions && targetQuiz.questions.length > 0) {
+        return res.status(200).json({ quiz: targetQuiz });
+      }
+    }
+
+    // Attempt to enqueue job (async mode via BullMQ + Upstash)
+    const jobResult = await enqueueAiJob('generate_quiz', {
+      documentId,
+      userId: req.user.id,
+      count: count ? parseInt(count, 10) : 5,
+      isPro,
+      quizTitle,
+      forceRegenerate: !!req.body.forceRegenerate
+    });
+
+    if (jobResult) {
+      // Queue available — respond immediately with jobId
+      return res.status(202).json({ jobId: jobResult.jobId, status: 'queued' });
+    }
+
+    // ---- Fallback: synchronous execution (no Redis) ----
+    // Use RAG to retrieve the most relevant chunks for quiz generation; fall back to full content
+    const ragContext = await retrieveRelevantChunks(documentId, 'Tạo bộ câu hỏi trắc nghiệm kiểm tra kiến thức từ tài liệu này');
+    const contentForQuiz = ragContext || doc.content;
+    console.log(`[Quiz] Using ${ragContext ? 'RAG context' : 'full doc content'} for document: ${documentId}`);
+
+    const quizQuestions = await generateQuiz(contentForQuiz, isPro, count ? parseInt(count, 10) : 5);
 
     let targetQuiz = null;
 

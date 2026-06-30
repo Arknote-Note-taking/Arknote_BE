@@ -31,7 +31,7 @@ const setUserPro = async (userId, status) => {
       .update({
         is_pro: status,
         pro_expires_at: expiresAt,
-        ai_credits_remaining: status ? 500 : 30 // Pro users get more daily credits
+        ai_credits_remaining: status ? 100 : 30 // Pro users get more daily credits
       })
       .eq('id', userId);
   } catch (err) {

@@ -1,6 +1,8 @@
 const supabase = require('../config/supabaseClient');
 const { generateFlashcards } = require('../services/aiService');
 const { isUserPro } = require('./userController');
+const { retrieveRelevantChunks } = require('../services/ragService');
+const { enqueueAiJob } = require('../services/jobQueue');
 
 // 1. Create custom deck
 const createDeck = async (req, res) => {
@@ -140,8 +142,48 @@ const generateAiFlashcards = async (req, res) => {
     const userPro = await isUserPro(req.user.id);
     const cardCount = count ? parseInt(count, 10) : 8;
 
+    // Check cache: if a deck with cards already exists, return them directly unless forceRegenerate is requested
+    const { data: existingDecks, error: deckSelectErr } = await supabase
+      .from('flashcard_decks')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('document_id', documentId);
+
+    if (!deckSelectErr && existingDecks && existingDecks.length > 0 && !req.body.forceRegenerate) {
+      const targetDeck = existingDecks[0];
+      const { data: existingCards, error: cardsSelectErr } = await supabase
+        .from('flashcards')
+        .select('*')
+        .eq('deck_id', targetDeck.id);
+
+      if (!cardsSelectErr && existingCards && existingCards.length > 0) {
+        return res.status(200).json({ deck: targetDeck, cards: existingCards });
+      }
+    }
+
+    // Attempt to enqueue job (async mode via BullMQ + Upstash)
+    const jobResult = await enqueueAiJob('generate_flashcards', {
+      documentId,
+      userId: req.user.id,
+      cardCount,
+      isPro: userPro || req.user.role === 'admin',
+      deckTitle: doc.title,
+      forceRegenerate: !!req.body.forceRegenerate
+    });
+
+    if (jobResult) {
+      // Queue is available — return jobId for frontend to poll/listen
+      return res.status(202).json({ jobId: jobResult.jobId, status: 'queued' });
+    }
+
+    // ---- Fallback: synchronous execution (no Redis) ----
+    // Use RAG to retrieve the most relevant chunks for flashcard generation; fall back to full content
+    const ragContext = await retrieveRelevantChunks(documentId, 'Tạo bộ flashcard ôn tập kiến thức từ tài liệu này');
+    const contentForFlashcards = ragContext || doc.content;
+    console.log(`[Flashcard] Using ${ragContext ? 'RAG context' : 'full doc content'} for document: ${documentId}`);
+
     // Call AI service to generate flashcards
-    const flashcardsData = await generateFlashcards(doc.content, userPro || req.user.role === 'admin', cardCount);
+    const flashcardsData = await generateFlashcards(contentForFlashcards, userPro || req.user.role === 'admin', cardCount);
 
     // Create flashcard deck
     const { data: deck, error: deckErr } = await supabase
