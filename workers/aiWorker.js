@@ -3,6 +3,34 @@ const supabase = require('../config/supabaseClient');
 const { generateFlashcards, generateQuiz } = require('../services/aiService');
 const { retrieveRelevantChunks } = require('../services/ragService');
 const { getConnection } = require('../services/jobQueue');
+const crypto = require('crypto');
+
+const getDeckHash = (description) => {
+  if (!description) return null;
+  const match = description.match(/\|\|\|hash:([a-f0-9]{32})/);
+  return match ? match[1] : null;
+};
+
+const cleanDeckDescription = (deck) => {
+  if (deck && deck.description) {
+    deck.description = deck.description.replace(/\|\|\|hash:[a-f0-9]{32}/g, '').trim();
+  }
+  return deck;
+};
+
+const getQuizHash = (questions) => {
+  if (Array.isArray(questions) && questions.length > 0 && questions[0]?.isMetadata) {
+    return questions[0].hash;
+  }
+  return null;
+};
+
+const cleanQuizQuestions = (quiz) => {
+  if (quiz && Array.isArray(quiz.questions) && quiz.questions[0]?.isMetadata) {
+    quiz.questions = quiz.questions.slice(1);
+  }
+  return quiz;
+};
 
 let workerInstance = null;
 
@@ -21,7 +49,7 @@ const startWorker = (io) => {
 
     // ---------- GENERATE FLASHCARDS ----------
     if (type === 'generate_flashcards') {
-      const { documentId, userId, cardCount, isPro, deckTitle } = data;
+      const { documentId, userId, cardCount, isPro, deckTitle, forceRegenerate, mode, currentHash } = data;
 
       // Check cache first
       const { data: existingDecks } = await supabase
@@ -30,20 +58,22 @@ const startWorker = (io) => {
         .eq('user_id', userId)
         .eq('document_id', documentId);
 
-      if (existingDecks && existingDecks.length > 0 && !data.forceRegenerate) {
+      const existingDeck = existingDecks?.[0];
+
+      if (existingDeck && !forceRegenerate) {
         const { data: existingCards } = await supabase
           .from('flashcards')
           .select('*')
-          .eq('deck_id', existingDecks[0].id);
+          .eq('deck_id', existingDeck.id);
 
         if (existingCards && existingCards.length > 0) {
           io?.emit(`job_done:${job.id}`, {
             type: 'flashcards',
-            deck: existingDecks[0],
+            deck: cleanDeckDescription(existingDeck),
             cards: existingCards,
             cached: true
           });
-          return { deck: existingDecks[0], cards: existingCards, cached: true };
+          return { deck: cleanDeckDescription(existingDeck), cards: existingCards, cached: true };
         }
       }
 
@@ -65,46 +95,91 @@ const startWorker = (io) => {
       const flashcardsData = await generateFlashcards(content, isPro, cardCount || 8);
       await job.updateProgress(80);
 
-      // Delete old deck if re-generating
-      if (existingDecks && existingDecks.length > 0 && data.forceRegenerate) {
-        await supabase.from('flashcard_decks').delete().eq('id', existingDecks[0].id);
+      let deck = existingDeck;
+      if (deck) {
+        if (mode === 'overwrite') {
+          // Overwrite mode: delete all existing cards first
+          await supabase.from('flashcards').delete().eq('deck_id', deck.id);
+        }
+        
+        const newDesc = ((deck.description || 'Tạo tự động bằng AI từ tài liệu').replace(/\|\|\|hash:[a-f0-9]{32}/g, '').trim() + ' |||hash:' + currentHash).trim();
+        const { data: updatedDeck, error: deckUpdateErr } = await supabase
+          .from('flashcard_decks')
+          .update({ description: newDesc })
+          .eq('id', deck.id)
+          .select()
+          .single();
+        
+        if (deckUpdateErr) throw deckUpdateErr;
+        deck = updatedDeck;
+      } else {
+        // Create new deck
+        const { data: newDeck, error: deckErr } = await supabase
+          .from('flashcard_decks')
+          .insert([{
+            user_id: userId,
+            document_id: documentId,
+            title: deckTitle || doc.title,
+            description: `Tạo tự động bằng AI từ tài liệu |||hash:${currentHash}`
+          }])
+          .select()
+          .single();
+
+        if (deckErr) throw deckErr;
+        deck = newDeck;
       }
 
-      // Create deck
-      const { data: deck, error: deckErr } = await supabase
-        .from('flashcard_decks')
-        .insert([{ user_id: userId, document_id: documentId, title: deckTitle || doc.title }])
-        .select()
-        .single();
-
-      if (deckErr) throw deckErr;
-
-      // Insert cards
-      const cardsToInsert = flashcardsData.map(c => ({
+      // Prepare cards
+      let cardsToInsert = flashcardsData.map(c => ({
         deck_id: deck.id,
         front_text: c.front_text,
         back_text: c.back_text
       }));
 
-      const { data: cards, error: cardsErr } = await supabase
-        .from('flashcards')
-        .insert(cardsToInsert)
-        .select();
+      if (mode === 'merge') {
+        const { data: existingCards } = await supabase
+          .from('flashcards')
+          .select('front_text')
+          .eq('deck_id', deck.id);
+        
+        if (existingCards && existingCards.length > 0) {
+          const existingFronts = new Set(existingCards.map(c => c.front_text.toLowerCase().trim().replace(/[.,/#!$%^&*;:{}=\-_`~()?]/g,"")));
+          cardsToInsert = cardsToInsert.filter(c => {
+            const normalizedFront = c.front_text.toLowerCase().trim().replace(/[.,/#!$%^&*;:{}=\-_`~()?]/g,"");
+            return !existingFronts.has(normalizedFront);
+          });
+        }
+      }
 
-      if (cardsErr) throw cardsErr;
+      let insertedCards = [];
+      if (cardsToInsert.length > 0) {
+        const { data: newCards, error: cardsErr } = await supabase
+          .from('flashcards')
+          .insert(cardsToInsert)
+          .select();
+
+        if (cardsErr) throw cardsErr;
+        insertedCards = newCards;
+      } else if (mode === 'merge') {
+        const { data: existingCards } = await supabase
+          .from('flashcards')
+          .select('*')
+          .eq('deck_id', deck.id);
+        insertedCards = existingCards || [];
+      }
 
       await job.updateProgress(100);
 
       // Notify frontend via Socket.IO
-      io?.emit(`job_done:${job.id}`, { type: 'flashcards', deck, cards });
-      io?.emit(`job_done:user:${userId}`, { type: 'flashcards', jobId: job.id, deck, cards });
+      io?.emit(`job_done:${job.id}`, { type: 'flashcards', deck: cleanDeckDescription(deck), cards: insertedCards });
+      io?.emit(`job_done:user:${userId}`, { type: 'flashcards', jobId: job.id, deck: cleanDeckDescription(deck), cards: insertedCards });
 
-      return { deck, cards };
+      return { deck: cleanDeckDescription(deck), cards: insertedCards };
     }
 
     // ---------- GENERATE QUIZ ----------
     if (type === 'generate_quiz') {
-      const { documentId, userId, count, isPro, quizTitle } = data;
+      const { documentId, userId, count, isPro, quizTitle, forceRegenerate, mode, currentHash } = data;
 
       // Check cache first
       const { data: existingQuizzes } = await supabase
@@ -114,11 +189,12 @@ const startWorker = (io) => {
         .eq('document_id', documentId)
         .eq('title', quizTitle);
 
-      if (existingQuizzes && existingQuizzes.length > 0 && !data.forceRegenerate) {
-        const q = existingQuizzes[0];
-        if (q.questions && q.questions.length > 0) {
-          io?.emit(`job_done:${job.id}`, { type: 'quiz', quiz: q, cached: true });
-          return { quiz: q, cached: true };
+      const existingQuiz = existingQuizzes?.[0];
+
+      if (existingQuiz && !forceRegenerate) {
+        if (existingQuiz.questions && existingQuiz.questions.length > 0) {
+          io?.emit(`job_done:${job.id}`, { type: 'quiz', quiz: cleanQuizQuestions(existingQuiz), cached: true });
+          return { quiz: cleanQuizQuestions(existingQuiz), cached: true };
         }
       }
 
@@ -137,23 +213,45 @@ const startWorker = (io) => {
 
       await job.updateProgress(30);
 
-      const quizQuestions = await generateQuiz(content, isPro, count || 5);
+      const generatedQuestions = await generateQuiz(content, isPro, count || 5);
       await job.updateProgress(80);
 
+      let finalQuestions = [];
+      if (existingQuiz && mode === 'merge') {
+        const oldQuestions = existingQuiz.questions.filter(q => !q.isMetadata);
+        const existingTexts = new Set(oldQuestions.map(q => q.question.toLowerCase().trim().replace(/[.,/#!$%^&*;:{}=\-_`~()?]/g,"")));
+        
+        const uniqueNewQuestions = generatedQuestions.filter(q => {
+          const normalizedText = q.question.toLowerCase().trim().replace(/[.,/#!$%^&*;:{}=\-_`~()?]/g,"");
+          return !existingTexts.has(normalizedText);
+        });
+        finalQuestions = [{ isMetadata: true, hash: currentHash }, ...oldQuestions, ...uniqueNewQuestions];
+      } else {
+        finalQuestions = [{ isMetadata: true, hash: currentHash }, ...generatedQuestions];
+      }
+
       let targetQuiz;
-      if (existingQuizzes && existingQuizzes.length > 0) {
+      if (existingQuiz) {
         const { data: updatedQuiz, error: updateErr } = await supabase
           .from('quizzes')
-          .update({ questions: quizQuestions })
-          .eq('id', existingQuizzes[0].id)
+          .update({ questions: finalQuestions })
+          .eq('id', existingQuiz.id)
           .select()
           .single();
         if (updateErr) throw updateErr;
         targetQuiz = updatedQuiz;
+
+        if (mode === 'overwrite') {
+          await supabase
+            .from('quiz_attempts')
+            .delete()
+            .eq('quiz_id', targetQuiz.id)
+            .eq('user_id', userId);
+        }
       } else {
         const { data: newQuiz, error: insertErr } = await supabase
           .from('quizzes')
-          .insert([{ user_id: userId, document_id: documentId, title: quizTitle, questions: quizQuestions }])
+          .insert([{ user_id: userId, document_id: documentId, title: quizTitle, questions: finalQuestions }])
           .select()
           .single();
         if (insertErr) throw insertErr;
@@ -162,10 +260,10 @@ const startWorker = (io) => {
 
       await job.updateProgress(100);
 
-      io?.emit(`job_done:${job.id}`, { type: 'quiz', quiz: targetQuiz });
-      io?.emit(`job_done:user:${userId}`, { type: 'quiz', jobId: job.id, quiz: targetQuiz });
+      io?.emit(`job_done:${job.id}`, { type: 'quiz', quiz: cleanQuizQuestions(targetQuiz) });
+      io?.emit(`job_done:user:${userId}`, { type: 'quiz', jobId: job.id, quiz: cleanQuizQuestions(targetQuiz) });
 
-      return { quiz: targetQuiz };
+      return { quiz: cleanQuizQuestions(targetQuiz) };
     }
 
     throw new Error(`Unknown job type: ${type}`);

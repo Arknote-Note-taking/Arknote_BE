@@ -23,8 +23,8 @@ const uploadDocument = async (req, res) => {
       });
     }
 
-    // Limit check for non-pro users
-    if (!userPro && req.user.role !== 'admin') {
+    // Limit check for user documents
+    if (req.user.role !== 'admin') {
       const { count, error: countErr } = await supabase
         .from('documents')
         .select('*', { count: 'exact', head: true })
@@ -33,12 +33,17 @@ const uploadDocument = async (req, res) => {
 
       if (countErr) throw countErr;
 
-      if (count >= 50) {
+      const maxDocs = userPro ? 300 : 50;
+      if (count >= maxDocs) {
         // Delete uploaded temp file to avoid junk in uploads folder
         if (req.file.path && fs.existsSync(req.file.path)) {
           fs.unlinkSync(req.file.path);
         }
-        return res.status(403).json({ error: 'Bạn đã đạt giới hạn tải lên tối đa là 50 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên không giới hạn!' });
+        return res.status(403).json({
+          error: userPro
+            ? 'Bạn đã đạt giới hạn tải lên tối đa là 300 tài liệu đối với tài khoản PRO.'
+            : 'Bạn đã đạt giới hạn tải lên tối đa là 50 tài liệu đối với tài khoản thường. Vui lòng nâng cấp Pro để tải lên tới 300 tài liệu!'
+        });
       }
     }
 
