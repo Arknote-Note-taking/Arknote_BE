@@ -3,6 +3,21 @@ const { summarizeDocument, answerQuestion, answerQuestionStream, generateContent
 const { isUserPro } = require('./userController');
 const { retrieveRelevantChunks } = require('../services/ragService');
 const { enqueueAiJob } = require('../services/jobQueue');
+const crypto = require('crypto');
+
+const getQuizHash = (questions) => {
+  if (Array.isArray(questions) && questions.length > 0 && questions[0]?.isMetadata) {
+    return questions[0].hash;
+  }
+  return null;
+};
+
+const cleanQuizQuestions = (quiz) => {
+  if (quiz && Array.isArray(quiz.questions) && quiz.questions[0]?.isMetadata) {
+    quiz.questions = quiz.questions.slice(1);
+  }
+  return quiz;
+};
 
 const getChatHistoryPrompt = async (chatId, userId) => {
   if (!chatId) return '';
@@ -283,10 +298,22 @@ const triggerQuiz = async (req, res) => {
       .eq('document_id', documentId)
       .eq('title', quizTitle);
 
-    if (!selectErr && existingQuizzes && existingQuizzes.length > 0 && !req.body.forceRegenerate) {
-      const targetQuiz = existingQuizzes[0];
-      if (targetQuiz.questions && targetQuiz.questions.length > 0) {
-        return res.status(200).json({ quiz: targetQuiz });
+    const existingQuiz = !selectErr && existingQuizzes && existingQuizzes.length > 0 ? existingQuizzes[0] : null;
+    const currentHash = crypto.createHash('md5').update(doc.content || '').digest('hex');
+
+    if (existingQuiz) {
+      const oldHash = getQuizHash(existingQuiz.questions);
+      if (req.body.forceRegenerate) {
+        if (currentHash === oldHash && req.body.ignoreHashCheck !== true) {
+          return res.status(409).json({ error: 'content_not_changed', message: 'Tài liệu không có thay đổi nội dung mới.' });
+        }
+        if (!req.body.mode) {
+          return res.status(200).json({ status: 'confirm_mode', message: 'Bạn muốn ghi đè bài trắc nghiệm cũ hay gộp thêm câu hỏi mới?' });
+        }
+      } else {
+        if (existingQuiz.questions && existingQuiz.questions.length > 0) {
+          return res.status(200).json({ quiz: cleanQuizQuestions(existingQuiz) });
+        }
       }
     }
 
@@ -297,7 +324,10 @@ const triggerQuiz = async (req, res) => {
       count: count ? parseInt(count, 10) : 5,
       isPro,
       quizTitle,
-      forceRegenerate: !!req.body.forceRegenerate
+      forceRegenerate: !!req.body.forceRegenerate,
+      mode: req.body.mode,
+      ignoreHashCheck: !!req.body.ignoreHashCheck,
+      currentHash
     });
 
     if (jobResult) {
@@ -311,16 +341,31 @@ const triggerQuiz = async (req, res) => {
     const contentForQuiz = ragContext || doc.content;
     console.log(`[Quiz] Using ${ragContext ? 'RAG context' : 'full doc content'} for document: ${documentId}`);
 
-    const quizQuestions = await generateQuiz(contentForQuiz, isPro, count ? parseInt(count, 10) : 5);
+    const generatedQuestions = await generateQuiz(contentForQuiz, isPro, count ? parseInt(count, 10) : 5);
+
+    let finalQuestions = [];
+    if (existingQuiz && req.body.mode === 'merge') {
+      const oldQuestions = existingQuiz.questions.filter(q => !q.isMetadata);
+      const existingTexts = new Set(oldQuestions.map(q => q.question.toLowerCase().trim().replace(/[.,/#!$%^&*;:{}=\-_`~()?]/g,"")));
+      
+      const uniqueNewQuestions = generatedQuestions.filter(q => {
+        const normalizedText = q.question.toLowerCase().trim().replace(/[.,/#!$%^&*;:{}=\-_`~()?]/g,"");
+        return !existingTexts.has(normalizedText);
+      });
+      finalQuestions = [{ isMetadata: true, hash: currentHash }, ...oldQuestions, ...uniqueNewQuestions];
+    } else {
+      // Overwrite mode or brand new quiz
+      finalQuestions = [{ isMetadata: true, hash: currentHash }, ...generatedQuestions];
+    }
 
     let targetQuiz = null;
 
-    if (existingQuizzes && existingQuizzes.length > 0) {
-      targetQuiz = existingQuizzes[0];
+    if (existingQuiz) {
+      targetQuiz = existingQuiz;
       const { data: updatedQuiz, error: updateErr } = await supabase
         .from('quizzes')
         .update({
-          questions: quizQuestions
+          questions: finalQuestions
         })
         .eq('id', targetQuiz.id)
         .select()
@@ -329,14 +374,16 @@ const triggerQuiz = async (req, res) => {
       if (updateErr) throw updateErr;
       targetQuiz = updatedQuiz;
 
-      // Delete any previous attempts for this quiz and user to reset progress
-      const { error: deleteErr } = await supabase
-        .from('quiz_attempts')
-        .delete()
-        .eq('quiz_id', targetQuiz.id)
-        .eq('user_id', req.user.id);
+      // Delete any previous attempts for this quiz and user to reset progress if overwriting
+      if (req.body.mode === 'overwrite') {
+        const { error: deleteErr } = await supabase
+          .from('quiz_attempts')
+          .delete()
+          .eq('quiz_id', targetQuiz.id)
+          .eq('user_id', req.user.id);
 
-      if (deleteErr) throw deleteErr;
+        if (deleteErr) throw deleteErr;
+      }
     } else {
       const { data: newQuiz, error: insertError } = await supabase
         .from('quizzes')
@@ -344,7 +391,7 @@ const triggerQuiz = async (req, res) => {
           user_id: req.user.id,
           document_id: documentId,
           title: quizTitle,
-          questions: quizQuestions
+          questions: finalQuestions
         }])
         .select()
         .single();
@@ -353,7 +400,7 @@ const triggerQuiz = async (req, res) => {
       targetQuiz = newQuiz;
     }
 
-    res.status(200).json({ quiz: targetQuiz });
+    res.status(200).json({ quiz: cleanQuizQuestions(targetQuiz) });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

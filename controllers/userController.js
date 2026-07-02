@@ -48,14 +48,14 @@ const getUsers = async (req, res) => {
     let users, error;
     const resUsers = await supabase
       .from('users')
-      .select('id, email, name, role, created_at, is_deleted, is_pro, ai_credits_remaining')
+      .select('id, email, name, role, created_at, is_deleted, is_pro, ai_credits_remaining, onboarding_completed, onboarding_surveys(answers)')
       .or('is_deleted.eq.false,is_deleted.is.null')
       .order('created_at', { ascending: false });
 
     if (resUsers.error && resUsers.error.code === '42703') {
       const fallbackUsers = await supabase
         .from('users')
-        .select('id, email, name, role, created_at, is_pro, ai_credits_remaining')
+        .select('id, email, name, role, created_at, is_pro, ai_credits_remaining, onboarding_completed, onboarding_surveys(answers)')
         .order('created_at', { ascending: false });
       users = fallbackUsers.data;
       error = fallbackUsers.error;
@@ -68,8 +68,23 @@ const getUsers = async (req, res) => {
 
     console.log(`[getUsers] Admin: ${req.user.email}, Users found in DB: ${users ? users.length : 0}`);
 
-    // Alias id to _id for FE and append is_pro
-    const formatted = users.map(u => ({ ...u, _id: u.id, is_pro: !!u.is_pro }));
+    // Alias id to _id for FE and append is_pro & onboarding answers
+    const formatted = users.map(u => {
+      let onboarding_answers = null;
+      if (u.onboarding_surveys) {
+        if (Array.isArray(u.onboarding_surveys) && u.onboarding_surveys.length > 0) {
+          onboarding_answers = u.onboarding_surveys[0].answers;
+        } else if (u.onboarding_surveys.answers) {
+          onboarding_answers = u.onboarding_surveys.answers;
+        }
+      }
+      return {
+        ...u,
+        _id: u.id,
+        is_pro: !!u.is_pro,
+        onboarding_answers
+      };
+    });
     res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -85,7 +100,7 @@ const getDeletedUsers = async (req, res) => {
     let users, error;
     const resUsers = await supabase
       .from('users')
-      .select('id, email, name, role, created_at, is_deleted, is_pro, ai_credits_remaining')
+      .select('id, email, name, role, created_at, is_deleted, is_pro, ai_credits_remaining, onboarding_completed, onboarding_surveys(answers)')
       .eq('is_deleted', true)
       .order('created_at', { ascending: false });
 
@@ -131,12 +146,23 @@ const getDeletedUsers = async (req, res) => {
       });
     }
 
-    const formatted = users.map(u => ({
-      ...u,
-      _id: u.id,
-      is_pro: !!u.is_pro,
-      restore_requested: requestedUserIds.has(u.id)
-    }));
+    const formatted = users.map(u => {
+      let onboarding_answers = null;
+      if (u.onboarding_surveys) {
+        if (Array.isArray(u.onboarding_surveys) && u.onboarding_surveys.length > 0) {
+          onboarding_answers = u.onboarding_surveys[0].answers;
+        } else if (u.onboarding_surveys.answers) {
+          onboarding_answers = u.onboarding_surveys.answers;
+        }
+      }
+      return {
+        ...u,
+        _id: u.id,
+        is_pro: !!u.is_pro,
+        onboarding_answers,
+        restore_requested: requestedUserIds.has(u.id)
+      };
+    });
     res.status(200).json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -202,11 +202,17 @@ const handleWebhook = async (req, res) => {
 
     const body = req.body;
 
-    // Verify signature
+    // Verify signature (throws error if signature is invalid)
     const webhookData = payos.webhooks.verify(body);
 
     if (webhookData) {
-      const { orderCode } = webhookData;
+      const { orderCode, code, amount } = webhookData;
+
+      // 1. Double check the transaction code is '00' (success)
+      if (code !== '00') {
+        console.log(`[Webhook] Payment not successful for order ${orderCode}. Status code: ${code}`);
+        return res.status(200).json({ success: true, message: `Webhook processed (Transaction status: ${code})` });
+      }
 
       // Fetch transaction from Supabase
       const { data: transaction, error: fetchError } = await supabase
@@ -215,9 +221,22 @@ const handleWebhook = async (req, res) => {
         .eq('order_code', orderCode)
         .single();
 
-      if (transaction && transaction.status !== 'paid') {
+      if (fetchError || !transaction) {
+        console.error(`[Webhook] Transaction not found in database for order ${orderCode}`);
+        return res.status(404).json({ error: 'Transaction not found' });
+      }
+
+      // 2. Validate transaction amount
+      if (transaction.amount !== amount) {
+        console.error(`[Webhook] Amount mismatch for order ${orderCode}. Expected: ${transaction.amount}, Received: ${amount}`);
+        return res.status(400).json({ error: 'Amount mismatch' });
+      }
+
+      if (transaction.status !== 'paid') {
+        // Upgrade user to PRO status
         await setUserPro(transaction.user_id, true);
 
+        // Update transaction status to paid
         const { error: updateError } = await supabase
           .from('payments')
           .update({
@@ -226,11 +245,16 @@ const handleWebhook = async (req, res) => {
           })
           .eq('order_code', orderCode);
 
-        if (updateError) throw updateError;
+        if (updateError) {
+          console.error(`[Webhook] Failed to update payment status for order ${orderCode}:`, updateError.message);
+          throw updateError;
+        }
 
         if (req.io) {
           req.io.emit('payment_success', { userId: transaction.user_id, orderCode });
         }
+        
+        console.log(`[Webhook] Payment verified successfully and upgraded user ${transaction.user_id} to PRO.`);
       }
 
       return res.status(200).json({ success: true, message: 'Webhook processed successfully' });

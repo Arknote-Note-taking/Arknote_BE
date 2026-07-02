@@ -1,5 +1,12 @@
 const supabase = require('../config/supabaseClient');
 
+const cleanQuizQuestions = (quiz) => {
+  if (quiz && Array.isArray(quiz.questions) && quiz.questions[0]?.isMetadata) {
+    quiz.questions = quiz.questions.slice(1);
+  }
+  return quiz;
+};
+
 // Get all quizzes created by the logged-in user
 const getQuizzes = async (req, res) => {
   try {
@@ -15,7 +22,7 @@ const getQuizzes = async (req, res) => {
     const { data: quizzes, error } = await query;
 
     if (error) throw error;
-    res.status(200).json(quizzes);
+    res.status(200).json(quizzes.map(cleanQuizQuestions));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -53,7 +60,7 @@ const getQuizById = async (req, res) => {
     const activeAttempt = attempts && attempts.length > 0 ? attempts[0] : null;
 
     res.status(200).json({
-      quiz,
+      quiz: cleanQuizQuestions(quiz),
       activeAttempt
     });
   } catch (error) {
@@ -64,14 +71,27 @@ const getQuizById = async (req, res) => {
 // Get user's quiz attempts history (only completed attempts)
 const getAttempts = async (req, res) => {
   try {
-    const { data: attempts, error } = await supabase
+    let query = supabase
       .from('quiz_attempts')
-      .select('id, quiz_id, score, is_completed, time_spent, completed_at, created_at, quiz:quizzes(id, title, document_id, questions)')
-      .eq('user_id', req.user.id)
+      .select('id, quiz_id, score, is_completed, time_spent, completed_at, created_at, user_id, user:users(id, email, name), quiz:quizzes(id, title, document_id, questions)')
       .order('completed_at', { ascending: false });
 
+    if (req.user.role !== 'admin') {
+      query = query.eq('user_id', req.user.id);
+    }
+
+    const { data: attempts, error } = await query;
+
     if (error) throw error;
-    res.status(200).json(attempts);
+    
+    const cleanedAttempts = attempts.map(att => {
+      if (att.quiz) {
+        att.quiz = cleanQuizQuestions(att.quiz);
+      }
+      return att;
+    });
+    
+    res.status(200).json(cleanedAttempts);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -199,7 +219,7 @@ const submitAttempt = async (req, res) => {
     if (attempt.is_completed) return res.status(200).json(attempt); // Already submitted
 
     const answersToEvaluate = userAnswers !== undefined ? userAnswers : attempt.user_answers;
-    const quiz = attempt.quiz;
+    const quiz = cleanQuizQuestions(attempt.quiz);
     if (!quiz || !quiz.questions) throw new Error('Parent quiz or questions missing');
 
     // Calculate score
@@ -254,6 +274,9 @@ const getAttemptById = async (req, res) => {
       return res.status(403).json({ error: 'Access forbidden' });
     }
 
+    if (attempt && attempt.quiz) {
+      attempt.quiz = cleanQuizQuestions(attempt.quiz);
+    }
     res.status(200).json(attempt);
   } catch (error) {
     console.error('[Error getAttemptById] Exception fetching attempt:', error);
