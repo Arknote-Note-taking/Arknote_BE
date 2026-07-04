@@ -191,7 +191,7 @@ const addDocumentComment = async (req, res) => {
     // Verify user has access to document
     const { data: doc, error: docErr } = await supabase
       .from('documents')
-      .select('id, user_id, folder_id')
+      .select('id, title, user_id, folder_id')
       .eq('id', documentId)
       .single();
 
@@ -228,17 +228,70 @@ const addDocumentComment = async (req, res) => {
 
     if (commentErr) throw commentErr;
 
-    // Notify document owner if comment is not by themselves
+    // Determine all recipients who have access to this document (view or edit)
+    const recipientIds = [];
+
+    // 1. Document Owner
     if (doc.user_id !== req.user.id) {
+      recipientIds.push(doc.user_id);
+    }
+
+    // 2. Folder Owner (if document is inside a folder)
+    if (doc.folder_id) {
+      try {
+        const { data: folder } = await supabase
+          .from('folders')
+          .select('user_id')
+          .eq('id', doc.folder_id)
+          .single();
+        if (folder && folder.user_id !== req.user.id && !recipientIds.includes(folder.user_id)) {
+          recipientIds.push(folder.user_id);
+        }
+      } catch (err) {
+        console.error('Error fetching folder owner for notifications:', err);
+      }
+    }
+
+    // 3. Shared Users of the Folder
+    if (doc.folder_id) {
+      try {
+        const { data: shares } = await supabase
+          .from('folder_shares')
+          .select('shared_to_email')
+          .eq('folder_id', doc.folder_id);
+
+        if (shares && shares.length > 0) {
+          const sharedEmails = shares.map(s => s.shared_to_email);
+          const { data: sharedUsers } = await supabase
+            .from('users')
+            .select('id')
+            .in('email', sharedEmails);
+
+          if (sharedUsers && sharedUsers.length > 0) {
+            sharedUsers.forEach(u => {
+              if (u.id !== req.user.id && !recipientIds.includes(u.id)) {
+                recipientIds.push(u.id);
+              }
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching shared users for notifications:', err);
+      }
+    }
+
+    // Notify all eligible recipients
+    for (const recipientId of recipientIds) {
       try {
         await createNotification(req, {
-          recipientId: doc.user_id,
+          recipientId,
           type: 'document_comment',
-          title: 'Bình luận mới trên tài liệu',
-          message: `Người dùng ${req.user.name || req.user.email} đã bình luận trên tài liệu của bạn.`
+          title: 'Thảo luận mới trên tài liệu',
+          message: `Người dùng ${req.user.name || req.user.email} đã bình luận trên tài liệu ${doc.title || 'tài liệu'}`,
+          docId: doc.id
         });
       } catch (e) {
-        console.error('Error sending comment notification:', e);
+        console.error(`Error sending comment notification to ${recipientId}:`, e);
       }
     }
 

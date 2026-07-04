@@ -98,3 +98,5 @@ server.listen(process.env.PORT, () => {
   const { startWorker } = require('./workers/aiWorker');
   startWorker(io);
 });
+
+// Trigger reload for nodemon: 2026-07-04T15:09

@@ -93,7 +93,7 @@ const getAnnotations = async (req, res) => {
       .from('document_annotations')
       .select('*')
       .eq('document_id', documentId)
-      .eq('user_id', req.user.id) // Get current user's annotations (or comments from everyone, but annotations are usually personal)
+      .eq('user_id', req.user.id)
       .order('created_at', { ascending: true });
 
     if (error) throw error;
@@ -103,6 +103,7 @@ const getAnnotations = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
 
 // 3. Delete an annotation
 const deleteAnnotation = async (req, res) => {
