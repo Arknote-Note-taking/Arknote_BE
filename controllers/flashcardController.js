@@ -342,7 +342,11 @@ const generateAiFlashcards = async (req, res) => {
 // 5. Review Flashcard and calculate SM-2 spaced repetition status
 const reviewFlashcard = async (req, res) => {
   try {
-    const { cardId, grade } = req.body; // grade must be 0 to 5
+    const { flashcardId, cardId: legacyCardId, grade } = req.body;
+    const cardId = flashcardId || legacyCardId; // accept both field names
+    if (!cardId) {
+      return res.status(400).json({ error: 'flashcardId là bắt buộc' });
+    }
     if (grade === undefined || grade < 0 || grade > 5) {
       return res.status(400).json({ error: 'Điểm đánh giá (grade) từ 0 đến 5 là bắt buộc' });
     }

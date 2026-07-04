@@ -68,6 +68,8 @@ const uploadDocument = async (req, res) => {
       subjectVal = 'Khác';
     }
 
+    const fileExtension = originalName.includes('.') ? originalName.split('.').pop().toLowerCase() : '';
+
     // 1. Save document with pending text extraction placeholders to DB immediately
     const { data: doc, error } = await supabase
       .from('documents')
@@ -80,7 +82,9 @@ const uploadDocument = async (req, res) => {
         embedding: null,
         summary: 'Đang trích xuất văn bản từ tệp...',
         user_id: req.user.id,
-        folder_id: req.body.folder_id || null
+        folder_id: req.body.folder_id || null,
+        mime_type: req.file.mimetype || null,
+        file_type: fileExtension || null
       }])
       .select()
       .single();
@@ -675,7 +679,7 @@ const getDashboardStats = async (req, res) => {
     const recentDocs = [...allUserDocs]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
       .slice(0, 5)
-      .map(d => ({ title: d.title, created_at: d.created_at, subject: d.subject, aiConfidence: d.ai_confidence, id: d.id, _id: d.id }));
+      .map(d => ({ title: d.title, created_at: d.created_at, subject: d.subject, aiConfidence: d.ai_confidence, id: d.id, _id: d.id, file_type: d.file_type, mime_type: d.mime_type }));
 
     res.status(200).json({
       totalDocs,
