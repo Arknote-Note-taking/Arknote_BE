@@ -243,7 +243,7 @@ const submitAttempt = async (req, res) => {
         completed_at: new Date().toISOString()
       })
       .eq('id', attemptId)
-      .select()
+      .select('*, quiz:quizzes(*)')
       .single();
 
     if (error) throw error;

@@ -21,6 +21,9 @@ router.use(requireAuth);
 
 router.post('/', createDeck);
 router.get('/', getDecks);
+router.post('/generate', checkAiLimit, generateAiFlashcards);
+router.post('/review', reviewFlashcard);
+
 router.get('/:id', getDeckById);
 router.put('/:id', updateDeck);
 router.delete('/:id', deleteDeck);
@@ -31,8 +34,5 @@ router.post('/:id/import', importDeck);
 router.post('/:deckId/cards', createCard);
 router.put('/cards/:cardId', updateCard);
 router.delete('/cards/:cardId', deleteCard);
-
-router.post('/generate', checkAiLimit, generateAiFlashcards);
-router.post('/review', reviewFlashcard);
 
 module.exports = router;
