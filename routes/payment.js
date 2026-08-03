@@ -9,11 +9,51 @@ const {
   getAdminTransactions
 } = require('../controllers/paymentController');
 
-// Webhook does not require authentication since it is triggered by PayOS
+/**
+ * @swagger
+ * tags:
+ *   name: Payment
+ *   description: PayOS payment integration and PRO subscription endpoints
+ */
+
+/**
+ * @swagger
+ * /api/payment/webhook:
+ *   post:
+ *     summary: PayOS Webhook receiver (Public)
+ *     tags: [Payment]
+ *     responses:
+ *       200:
+ *         description: Webhook processed successfully
+ */
 router.post('/webhook', handleWebhook);
 
-// Protected routes (requires user logged in)
+/**
+ * @swagger
+ * /api/payment/create-payment-link:
+ *   post:
+ *     summary: Create PayOS checkout link for PRO upgrade
+ *     tags: [Payment]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Payment URL generated
+ */
 router.post('/create-payment-link', requireAuth, createPaymentLink);
+
+/**
+ * @swagger
+ * /api/payment/verify-payment:
+ *   post:
+ *     summary: Verify payment status after checkout redirect
+ *     tags: [Payment]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Payment verified and PRO account activated
+ */
 router.post('/verify-payment', requireAuth, verifyPayment);
 
 // Admin revenue routes

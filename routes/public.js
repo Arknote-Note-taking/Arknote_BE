@@ -2,7 +2,23 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../config/supabaseClient');
 
-// Get real project statistics for the landing page
+/**
+ * @swagger
+ * tags:
+ *   name: Public
+ *   description: Public system statistics for landing pages
+ */
+
+/**
+ * @swagger
+ * /api/public/stats:
+ *   get:
+ *     summary: Get public system statistics
+ *     tags: [Public]
+ *     responses:
+ *       200:
+ *         description: Statistics data (users count, documents count, ocr accuracy, etc.)
+ */
 router.get('/stats', async (req, res) => {
   try {
     // 1. Get total users count (including soft-deleted ones)
