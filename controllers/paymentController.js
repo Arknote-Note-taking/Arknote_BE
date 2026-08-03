@@ -29,6 +29,42 @@ if (
   console.log("PayOS credentials not fully configured yet. Running in placeholder mode.");
 }
 
+const PAYMENT_EXPIRATION_MS = 15 * 60 * 1000; // 15 minutes
+
+const autoCancelExpiredPayments = async () => {
+  try {
+    const cutoffDate = new Date(Date.now() - PAYMENT_EXPIRATION_MS).toISOString();
+    
+    // Fetch pending payments created before cutoffDate
+    const { data: expiredPayments, error: selectError } = await supabase
+      .from('payments')
+      .select('id, order_code, created_at')
+      .eq('status', 'pending')
+      .lt('created_at', cutoffDate);
+
+    if (selectError) {
+      console.error('[PaymentCleanup] Error querying pending payments:', selectError.message);
+      return;
+    }
+
+    if (expiredPayments && expiredPayments.length > 0) {
+      const orderCodes = expiredPayments.map(p => p.order_code);
+      const { error: updateError } = await supabase
+        .from('payments')
+        .update({ status: 'cancelled' })
+        .in('order_code', orderCodes);
+
+      if (updateError) {
+        console.error('[PaymentCleanup] Error updating expired payments:', updateError.message);
+      } else {
+        console.log(`[PaymentCleanup] Auto-cancelled ${expiredPayments.length} payment(s) older than 15 minutes.`);
+      }
+    }
+  } catch (err) {
+    console.error('[PaymentCleanup] Exception during payment cleanup:', err.message);
+  }
+};
+
 const createPaymentLink = async (req, res) => {
   try {
     const isMock = process.env.MOCK_PAYMENT === 'true';
@@ -114,6 +150,23 @@ const verifyPayment = async (req, res) => {
 
     if (fetchError || !transaction) {
       return res.status(404).json({ error: 'Không tìm thấy thông tin giao dịch trong hệ thống' });
+    }
+
+    // Check if pending transaction has expired (older than 15 minutes)
+    if (transaction.status === 'pending') {
+      const createdAtMs = new Date(transaction.created_at).getTime();
+      if (Date.now() - createdAtMs > PAYMENT_EXPIRATION_MS) {
+        await supabase
+          .from('payments')
+          .update({ status: 'cancelled' })
+          .eq('order_code', orderCode);
+
+        return res.status(400).json({
+          success: false,
+          error: 'Liên kết thanh toán đã hết hạn (quá 15 phút). Trạng thái đơn hàng đã chuyển thành Đã Hủy.',
+          status: 'CANCELLED'
+        });
+      }
     }
 
     const isMock = process.env.MOCK_PAYMENT === 'true';
@@ -273,6 +326,9 @@ const getRevenueSummary = async (req, res) => {
       return res.status(403).json({ error: 'Quyền truy cập bị từ chối. Chỉ Admin mới có thể xem báo cáo doanh thu.' });
     }
 
+    // Auto-cancel expired payments (> 15 minutes) before computing summary
+    await autoCancelExpiredPayments();
+
     // Fetch all payments joined with users
     const { data: payments, error } = await supabase
       .from('payments')
@@ -398,6 +454,9 @@ const getAdminTransactions = async (req, res) => {
       return res.status(403).json({ error: 'Quyền truy cập bị từ chối.' });
     }
 
+    // Auto-cancel expired payments (> 15 minutes) before fetching transactions
+    await autoCancelExpiredPayments();
+
     const { status, search } = req.query;
 
     let query = supabase
@@ -440,6 +499,7 @@ module.exports = {
   verifyPayment,
   handleWebhook,
   getRevenueSummary,
-  getAdminTransactions
+  getAdminTransactions,
+  autoCancelExpiredPayments
 };
 
