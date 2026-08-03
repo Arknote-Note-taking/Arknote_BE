@@ -292,8 +292,8 @@ const handleWebhook = async (req, res) => {
         .single();
 
       if (fetchError || !transaction) {
-        console.error(`[Webhook] Transaction not found in database for order ${orderCode}`);
-        return res.status(404).json({ error: 'Transaction not found' });
+        console.log(`[Webhook] Transaction not found in database for order ${orderCode} (possibly test webhook or mock order). Returning 200 OK.`);
+        return res.status(200).json({ success: true, message: 'Webhook received (Transaction not found in local DB)' });
       }
 
       // 2. Validate transaction amount
