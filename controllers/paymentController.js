@@ -267,8 +267,179 @@ const handleWebhook = async (req, res) => {
   }
 };
 
+const getRevenueSummary = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Quyền truy cập bị từ chối. Chỉ Admin mới có thể xem báo cáo doanh thu.' });
+    }
+
+    // Fetch all payments joined with users
+    const { data: payments, error } = await supabase
+      .from('payments')
+      .select('*, users(id, email, name, avatar_url)')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const allPayments = payments || [];
+
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+
+    let totalRevenue = 0;
+    let todayRevenue = 0;
+    let monthRevenue = 0;
+    let yearRevenue = 0;
+
+    let paidCount = 0;
+    let pendingCount = 0;
+    let cancelledCount = 0;
+
+    // Daily revenue map (last 30 days)
+    const dailyMap = {};
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      dailyMap[key] = { date: key, revenue: 0, count: 0 };
+    }
+
+    // Monthly revenue map (12 months of current year)
+    const monthlyMap = {};
+    for (let m = 1; m <= 12; m++) {
+      const mStr = `${currentYear}-${m < 10 ? '0' + m : m}`;
+      monthlyMap[mStr] = { month: mStr, label: `Thg ${m}`, revenue: 0, count: 0 };
+    }
+
+    // Yearly revenue map
+    const yearlyMap = {};
+
+    allPayments.forEach(p => {
+      const pAmount = Number(p.amount) || 0;
+      const status = (p.status || 'pending').toLowerCase();
+
+      if (status === 'paid') {
+        paidCount++;
+        totalRevenue += pAmount;
+
+        const dateObj = new Date(p.paid_at || p.created_at);
+        const pDateStr = dateObj.toISOString().slice(0, 10);
+        const pMonth = dateObj.getMonth();
+        const pYear = dateObj.getFullYear();
+        const pMonthStr = `${pYear}-${pMonth + 1 < 10 ? '0' + (pMonth + 1) : pMonth + 1}`;
+
+        if (pDateStr === todayStr) {
+          todayRevenue += pAmount;
+        }
+
+        if (pMonth === currentMonth && pYear === currentYear) {
+          monthRevenue += pAmount;
+        }
+
+        if (pYear === currentYear) {
+          yearRevenue += pAmount;
+        }
+
+        // Daily
+        if (dailyMap[pDateStr]) {
+          dailyMap[pDateStr].revenue += pAmount;
+          dailyMap[pDateStr].count += 1;
+        }
+
+        // Monthly
+        if (monthlyMap[pMonthStr]) {
+          monthlyMap[pMonthStr].revenue += pAmount;
+          monthlyMap[pMonthStr].count += 1;
+        }
+
+        // Yearly
+        if (!yearlyMap[pYear]) {
+          yearlyMap[pYear] = { year: String(pYear), revenue: 0, count: 0 };
+        }
+        yearlyMap[pYear].revenue += pAmount;
+        yearlyMap[pYear].count += 1;
+      } else if (status === 'pending') {
+        pendingCount++;
+      } else if (status === 'cancelled' || status === 'canceled' || status === 'failed') {
+        cancelledCount++;
+      }
+    });
+
+    const totalTransactions = allPayments.length;
+    const avgTransactionValue = paidCount > 0 ? Math.round(totalRevenue / paidCount) : 0;
+
+    res.status(200).json({
+      summary: {
+        totalRevenue,
+        todayRevenue,
+        monthRevenue,
+        yearRevenue,
+        totalTransactions,
+        paidCount,
+        pendingCount,
+        cancelledCount,
+        avgTransactionValue
+      },
+      daily: Object.values(dailyMap),
+      monthly: Object.values(monthlyMap),
+      yearly: Object.values(yearlyMap).sort((a, b) => a.year.localeCompare(b.year))
+    });
+  } catch (error) {
+    console.error("Get revenue summary error:", error);
+    res.status(500).json({ error: error.message || 'Lỗi khi lấy thông tin doanh thu' });
+  }
+};
+
+const getAdminTransactions = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Quyền truy cập bị từ chối.' });
+    }
+
+    const { status, search } = req.query;
+
+    let query = supabase
+      .from('payments')
+      .select('*, users(id, email, name, avatar_url)', { count: 'exact' })
+      .order('created_at', { ascending: false });
+
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    }
+
+    const { data: transactions, error, count } = await query;
+
+    if (error) throw error;
+
+    let filtered = transactions || [];
+
+    if (search && search.trim()) {
+      const q = search.trim().toLowerCase();
+      filtered = filtered.filter(t => {
+        const orderStr = String(t.order_code || '').toLowerCase();
+        const userEmail = (t.users?.email || '').toLowerCase();
+        const userName = (t.users?.name || t.users?.full_name || '').toLowerCase();
+        return orderStr.includes(q) || userEmail.includes(q) || userName.includes(q);
+      });
+    }
+
+    res.status(200).json({
+      transactions: filtered,
+      totalCount: count || filtered.length
+    });
+  } catch (error) {
+    console.error("Get admin transactions error:", error);
+    res.status(500).json({ error: error.message || 'Lỗi khi lấy danh sách giao dịch' });
+  }
+};
+
 module.exports = {
   createPaymentLink,
   verifyPayment,
-  handleWebhook
+  handleWebhook,
+  getRevenueSummary,
+  getAdminTransactions
 };
+
