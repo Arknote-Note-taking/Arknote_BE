@@ -97,6 +97,10 @@ server.listen(process.env.PORT, () => {
   // Start BullMQ AI Worker (requires Upstash Redis via UPSTASH_REDIS_URL)
   const { startWorker } = require('./workers/aiWorker');
   startWorker(io);
+
+  // Start automatic payment 15-min expiration cleanup service
+  const { startPaymentCleanupInterval } = require('./services/paymentCleanupService');
+  startPaymentCleanupInterval();
 });
 
 // Trigger reload for nodemon: 2026-07-04T15:09
