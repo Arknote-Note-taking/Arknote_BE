@@ -19,6 +19,9 @@ const annotationRoutes = require('./routes/annotations');
 const publicRoutes = require('./routes/public');
 const jobRoutes = require('./routes/jobs');
 
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
+
 const app = express();
 const server = http.createServer(app);
 
@@ -47,6 +50,9 @@ app.use((req, res, next) => {
   console.log(req.path, req.method);
   next();
 });
+
+// Swagger Documentation Endpoint
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Routes
 app.use('/api/auth', authRoutes);
