@@ -141,15 +141,28 @@ const verifyPayment = async (req, res) => {
       return res.status(400).json({ error: 'Mã đơn hàng (orderCode) là bắt buộc' });
     }
 
+    const numOrderCode = Number(orderCode);
+
     // Fetch transaction from Supabase
     const { data: transaction, error: fetchError } = await supabase
       .from('payments')
       .select('*')
-      .eq('order_code', orderCode)
+      .eq('order_code', numOrderCode)
       .single();
 
     if (fetchError || !transaction) {
       return res.status(404).json({ error: 'Không tìm thấy thông tin giao dịch trong hệ thống' });
+    }
+
+    // If transaction is already marked paid (e.g. via webhook or previous verification)
+    if (transaction.status === 'paid') {
+      await setUserPro(transaction.user_id, true);
+      return res.status(200).json({
+        success: true,
+        message: 'Thanh toán thành công và tài khoản đã được nâng cấp lên PRO.',
+        status: 'PAID',
+        amount: transaction.amount
+      });
     }
 
     // Check if pending transaction has expired (older than 15 minutes)
@@ -159,7 +172,7 @@ const verifyPayment = async (req, res) => {
         await supabase
           .from('payments')
           .update({ status: 'cancelled' })
-          .eq('order_code', orderCode);
+          .eq('order_code', numOrderCode);
 
         return res.status(400).json({
           success: false,
@@ -172,7 +185,7 @@ const verifyPayment = async (req, res) => {
     const isMock = process.env.MOCK_PAYMENT === 'true';
 
     if (isMock) {
-      console.log(`[MOCK PAYMENT] Verifying order ${orderCode} (Automatic approval)`);
+      console.log(`[MOCK PAYMENT] Verifying order ${numOrderCode} (Automatic approval)`);
 
       // Upgrade user
       await setUserPro(transaction.user_id, true);
@@ -184,13 +197,13 @@ const verifyPayment = async (req, res) => {
           status: 'paid',
           paid_at: new Date().toISOString()
         })
-        .eq('order_code', orderCode);
+        .eq('order_code', numOrderCode);
 
       if (updateError) throw updateError;
 
       // Notify via Socket
       if (req.io) {
-        req.io.emit('payment_success', { userId: transaction.user_id, orderCode });
+        req.io.emit('payment_success', { userId: transaction.user_id, orderCode: numOrderCode });
       }
 
       return res.status(200).json({
@@ -206,7 +219,7 @@ const verifyPayment = async (req, res) => {
     }
 
     // Call PayOS API to get payment details
-    const paymentInfo = await payos.paymentRequests.get(orderCode);
+    const paymentInfo = await payos.paymentRequests.get(numOrderCode);
 
     if (paymentInfo && (paymentInfo.status === 'PAID' || paymentInfo.status === 'COMPLETED')) {
       // Upgrade user
@@ -219,13 +232,13 @@ const verifyPayment = async (req, res) => {
           status: 'paid',
           paid_at: new Date().toISOString()
         })
-        .eq('order_code', orderCode);
+        .eq('order_code', numOrderCode);
 
       if (updateError) throw updateError;
 
       // Notify via Socket
       if (req.io) {
-        req.io.emit('payment_success', { userId: transaction.user_id, orderCode });
+        req.io.emit('payment_success', { userId: transaction.user_id, orderCode: numOrderCode });
       }
 
       return res.status(200).json({
@@ -238,8 +251,8 @@ const verifyPayment = async (req, res) => {
 
     res.status(200).json({
       success: false,
-      message: `Giao dịch chưa được hoàn thành. Trạng thái hiện tại: ${paymentInfo.status}`,
-      status: paymentInfo.status
+      message: `Giao dịch chưa được hoàn thành. Trạng thái hiện tại: ${paymentInfo ? paymentInfo.status : 'PENDING'}`,
+      status: paymentInfo ? paymentInfo.status : 'PENDING'
     });
   } catch (error) {
     console.error("Verify payment error:", error);
@@ -255,11 +268,15 @@ const handleWebhook = async (req, res) => {
 
     const body = req.body;
 
-    // Verify signature (throws error if signature is invalid)
-    const webhookData = payos.webhooks.verify(body);
+    // Verify signature with PayOS SDK v2 (must await payos.webhooks.verify)
+    const webhookData = await payos.webhooks.verify(body);
 
     if (webhookData) {
-      const { orderCode, code, amount } = webhookData;
+      // PayOS SDK v2 returns verified payload inside `webhookData.data`
+      const data = webhookData.data || webhookData;
+      const orderCode = Number(data.orderCode || webhookData.orderCode);
+      const code = data.code || webhookData.code;
+      const amount = Number(data.amount || webhookData.amount);
 
       // 1. Double check the transaction code is '00' (success)
       if (code !== '00') {
@@ -280,7 +297,7 @@ const handleWebhook = async (req, res) => {
       }
 
       // 2. Validate transaction amount
-      if (transaction.amount !== amount) {
+      if (Number(transaction.amount) !== amount) {
         console.error(`[Webhook] Amount mismatch for order ${orderCode}. Expected: ${transaction.amount}, Received: ${amount}`);
         return res.status(400).json({ error: 'Amount mismatch' });
       }
