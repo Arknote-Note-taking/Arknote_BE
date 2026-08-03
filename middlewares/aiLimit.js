@@ -15,7 +15,7 @@ const checkAiLimit = async (req, res, next) => {
     // Fetch fresh user credits data from Supabase
     const { data: user, error } = await supabase
       .from('users')
-      .select('ai_credits_remaining, is_pro')
+      .select('ai_credits_remaining, is_pro, last_credit_reset_at')
       .eq('id', req.user.id)
       .single();
 
@@ -24,6 +24,23 @@ const checkAiLimit = async (req, res, next) => {
     }
 
     const isPro = !!user.is_pro;
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const lastResetStr = user.last_credit_reset_at ? new Date(user.last_credit_reset_at).toISOString().slice(0, 10) : '';
+
+    // Check if new day: reset daily credits (30 for Free, 100 for Pro)
+    if (lastResetStr !== todayStr) {
+      const resetCredits = isPro ? 100 : 30;
+      const nowIso = new Date().toISOString();
+      await supabase
+        .from('users')
+        .update({
+          ai_credits_remaining: resetCredits,
+          last_credit_reset_at: nowIso
+        })
+        .eq('id', req.user.id);
+
+      user.ai_credits_remaining = resetCredits;
+    }
 
     if (user.ai_credits_remaining <= 0) {
       // Log quota exceeded event
