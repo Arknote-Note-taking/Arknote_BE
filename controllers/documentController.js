@@ -195,6 +195,9 @@ const uploadDocument = async (req, res) => {
       }
     })();
   } catch (error) {
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
     res.status(500).json({ error: error.message });
   }
 };

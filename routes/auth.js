@@ -1,8 +1,15 @@
 const express = require('express');
 const { registerUser, loginUser, forgotPassword, resetPassword, googleLogin, setPassword } = require('../controllers/authController');
 const { requireAuth } = require('../middlewares/auth');
+const { createRateLimiter } = require('../middlewares/rateLimiter');
 
 const router = express.Router();
+
+const authLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  message: 'Bạn đã thực hiện quá nhiều yêu cầu đăng nhập/đăng ký. Vui lòng thử lại sau 15 phút!'
+});
 
 /**
  * @swagger
@@ -42,7 +49,7 @@ const router = express.Router();
  *       400:
  *         description: Invalid input or email already exists
  */
-router.post('/register', registerUser);
+router.post('/register', authLimiter, registerUser);
 
 /**
  * @swagger
@@ -72,7 +79,7 @@ router.post('/register', registerUser);
  *       401:
  *         description: Invalid email or password
  */
-router.post('/login', loginUser);
+router.post('/login', authLimiter, loginUser);
 
 /**
  * @swagger
@@ -96,7 +103,7 @@ router.post('/login', loginUser);
  *       200:
  *         description: Reset email sent successfully
  */
-router.post('/forgot-password', forgotPassword);
+router.post('/forgot-password', authLimiter, forgotPassword);
 
 /**
  * @swagger
@@ -122,7 +129,7 @@ router.post('/forgot-password', forgotPassword);
  *       200:
  *         description: Password reset successful
  */
-router.post('/reset-password', resetPassword);
+router.post('/reset-password', authLimiter, resetPassword);
 
 /**
  * @swagger
