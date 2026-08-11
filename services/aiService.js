@@ -171,6 +171,95 @@ const generateContentStreamWithRetry = async (model, prompt, maxRetries = 5) => 
   }
 };
 
+const isComparisonFlashcardFront = (frontText) => {
+  const text = String(frontText || '').trim().toLowerCase();
+  const compactText = text.replace(/\s+/g, '');
+
+  return (
+    /\bvs\b|ｖｓ|v\.s\./i.test(text) ||
+    /so sánh|phan biet|phân biệt|khác nhau|違い|ちがい|使い分け/i.test(text) ||
+    /「[^」]+」\s*(?:vs|ｖｓ|v\.s\.|／|\/)\s*「[^」]+」/i.test(text) ||
+    /[^\s]+(?:\s+|[「」])(?:vs|ｖｓ|v\.s\.)(?:\s+|[「」])[^\s]+/i.test(text) ||
+    /[^\s]+[／/][^\s]+/.test(compactText)
+  );
+};
+
+const normalizeFlashcardFrontKey = (frontText) => (
+  String(frontText || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()?[\]"'「」『』（）()、。・\s]/g, '')
+);
+
+const hasJapaneseKanji = (text) => /[\u3400-\u9fff]/.test(String(text || ''));
+
+const hasJapaneseReading = (text) => /[ぁ-ゖァ-ヺー]/.test(String(text || ''));
+
+const shouldRequireJapaneseReading = (sourceText, card) => {
+  const source = String(sourceText || '');
+  const frontText = String(card?.front_text || '');
+  const backText = String(card?.back_text || '');
+  return hasJapaneseReading(source) || hasJapaneseReading(frontText) || hasJapaneseReading(backText);
+};
+
+const isValidGeneratedFlashcard = (card, sourceText = '') => {
+  const frontText = String(card?.front_text || '').trim();
+  const backText = String(card?.back_text || '').trim();
+  if (!frontText || !backText) return false;
+  if (isComparisonFlashcardFront(frontText)) return false;
+  if (shouldRequireJapaneseReading(sourceText, card) && hasJapaneseKanji(frontText) && !hasJapaneseReading(backText)) return false;
+  return true;
+};
+
+const sanitizeGeneratedFlashcards = (cards, sourceText = '') => {
+  if (!Array.isArray(cards)) return [];
+
+  return cards
+    .map((card) => {
+      const frontText = String(card?.front_text || '').trim();
+      let backText = String(card?.back_text || '').trim();
+      if (!frontText || !backText) return null;
+
+      if (isComparisonFlashcardFront(frontText)) return null;
+
+      let cleanFront = frontText;
+      const parentheticalReading = frontText.match(/^(.+?)\s*[（(]([ぁ-ゖァ-ヺーa-zA-Z\s・]+)[）)]\s*$/);
+      if (parentheticalReading && /[\u3400-\u9fff]/.test(parentheticalReading[1])) {
+        cleanFront = parentheticalReading[1].trim();
+        const reading = parentheticalReading[2].trim();
+        if (reading && !backText.includes(reading)) {
+          backText = `Phiên âm / Cách đọc: ${reading}\n${backText}`;
+        }
+      }
+
+      const normalizedCard = {
+        front_text: cleanFront,
+        back_text: backText
+      };
+
+      if (!isValidGeneratedFlashcard(normalizedCard, sourceText)) return null;
+
+      return normalizedCard;
+    })
+    .filter(Boolean);
+};
+
+const mergeUniqueFlashcards = (currentCards, nextCards, targetCount, sourceText = '') => {
+  const seen = new Set(currentCards.map(card => normalizeFlashcardFrontKey(card.front_text)));
+  const merged = [...currentCards];
+
+  for (const card of nextCards) {
+    if (!isValidGeneratedFlashcard(card, sourceText)) continue;
+    const key = normalizeFlashcardFrontKey(card.front_text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(card);
+    if (merged.length >= targetCount) break;
+  }
+
+  return merged;
+};
+
 const extractMetadata = async (text, isPro = false) => {
   if (useMock) {
     return {
@@ -377,7 +466,7 @@ const generateQuiz = async (text, isPro = true, count = 5) => {
             required: ['question', 'options', 'answer', 'explanation']
           }
         },
-        maxOutputTokens: 8192
+        maxOutputTokens: 16384
       }
     });
 
@@ -414,9 +503,28 @@ Mỗi câu hỏi phải có đúng 4 đáp án lựa chọn (A, B, C, D) và ch�
 
 Tài liệu:\n\n${text.substring(0, limit)}`;
 
-    const result = await generateWithRetry(model, prompt);
-    const responseText = result.response.text();
-    return safeJsonParse(responseText);
+    const generateAndParse = async (promptText) => {
+      const result = await generateWithRetry(model, promptText);
+      const responseText = result.response.text();
+      return safeJsonParse(responseText);
+    };
+
+    let parsedFlashcards = await generateAndParse(prompt);
+    if (hasRequestedCount && Array.isArray(parsedFlashcards) && parsedFlashcards.length !== cardCount) {
+      const retryPrompt = `${prompt}
+
+Lần trả lời trước tạo ${parsedFlashcards.length} thẻ, sai số lượng người dùng yêu cầu.
+Hãy tạo lại JSON array với ĐÚNG CHÍNH XÁC ${cardCount} object flashcard.
+Không được trả ít hơn hoặc nhiều hơn ${cardCount} object.`;
+      parsedFlashcards = await generateAndParse(retryPrompt);
+    }
+
+    if (hasRequestedCount && (!Array.isArray(parsedFlashcards) || parsedFlashcards.length !== cardCount)) {
+      const actualCount = Array.isArray(parsedFlashcards) ? parsedFlashcards.length : 0;
+      throw new Error(`AI chỉ tạo được ${actualCount}/${cardCount} thẻ theo yêu cầu. Hệ thống không lưu kết quả sai số lượng, vui lòng thử lại.`);
+    }
+
+    return parsedFlashcards;
   } catch (err) {
     console.error('Error in Gemini generateQuiz:', err);
     throw new Error(parseAiError(err, 'Không thể tạo quiz tự động từ tài liệu này.'));
@@ -489,14 +597,7 @@ const generateFlashcards = async (text, isPro = true, count = null) => {
   const cardCount = count ? parseInt(count, 10) : defaultCount;
 
   if (useMock) {
-    const mockFlashcards = [];
-    for (let i = 1; i <= cardCount; i++) {
-      mockFlashcards.push({
-        front_text: `Câu hỏi ôn tập (Flashcard) số ${i} từ tài liệu?`,
-        back_text: `Câu trả lời tương ứng số ${i} nhằm ghi nhớ kiến thức cốt lõi.`
-      });
-    }
-    return mockFlashcards;
+    throw new Error('Chưa cấu hình GEMINI_API_KEY nên không thể tạo flashcard từ dữ liệu thật.');
   }
 
   try {
@@ -515,81 +616,114 @@ const generateFlashcards = async (text, isPro = true, count = null) => {
             required: ['front_text', 'back_text']
           }
         },
-        maxOutputTokens: 8192
+        maxOutputTokens: 16384
       }
     });
 
     const limit = isPro ? 25000 : 10000;
-    const promptCountText = isPro && (!count || count >= 30)
-      ? 'tất cả các từ vựng, thuật ngữ, mẫu ngữ pháp và nội dung cốt lõi có trong tài liệu (tối đa 40-50 thẻ đầy đủ nhất)'
+    const hasRequestedCount = count !== null && count !== undefined && !Number.isNaN(cardCount);
+    const promptCountText = hasRequestedCount
+      ? `ĐÚNG CHÍNH XÁC ${cardCount} thẻ ghi nhớ, không ít hơn và không nhiều hơn`
+      : isPro
+      ? 'tất cả các từ vựng, thuật ngữ, mẫu ngữ pháp và nội dung cốt lõi có trong tài liệu'
       : `đúng ${cardCount} thẻ ghi nhớ`;
 
-    const prompt = `Bạn là một chuyên gia sư phạm & AI thiết kế Flashcards học tập đỉnh cao.
-Hãy ĐỌC KỸ và PHÂN TÍCH CHUYÊN SÂU NỘI DUNG TÀI LIỆU dưới đây để tạo ${promptCountText} ĐẠT TIÊU CHUẨN SƯ PHẠM CAO NHẤT.
+    const prompt = `Bạn là một chuyên gia sư phạm & AI thiết kế flashcard học tập.
+Hãy đọc kỹ nội dung tài liệu dưới đây để tạo ${promptCountText} từ dữ liệu thật trong tài liệu.
 
 ================================================================================
-⚠️ NGUYÊN TẮC VÀNG BẮT BUỘC DÀNH CHO MẶT TRƯỚC (front_text) VÀ MẶT SAU (back_text)
+QUY TẮC BẮT BUỘC CHO MẶT TRƯỚC (front_text) VÀ MẶT SAU (back_text)
 ================================================================================
 
-1. NGUYÊN TẮC MẶT TRƯỚC (front_text):
-   - TUYỆT ĐỐI KHÔNG ĐẶT CÂU HỎI DÀI NGUYÊN VĂN (Ví dụ CẤM: "..." と "..." の違いは何ですか？ hoặc "Từ này nghĩa là gì trong tiếng Việt?").
-   - MẶT TRƯỚC CHỈ ĐƯỢC CHỨA TỪ VỰNG / THUẬT NGỮ / CỤM TỪ / NGUYÊN MẪU NGẮN GỌN (Ví dụ ĐÚNG: "交換 (こうかん)", "やり取りする", "Subsequent (adj)", hoặc "「交換」 vs 「やり取り」").
-   - Nếu là tài liệu từ vựng hoặc so sánh từ: Mặt trước BẮT BUỘC chỉ là chính từ vựng đó hoặc cụm 2 từ ngắn gọn. Không chứa câu hỏi lằng nhằng.
+1. Mặt trước (front_text):
+   - Chỉ chứa MỘT từ vựng, thuật ngữ, cụm từ, mẫu câu ngắn hoặc ý trọng tâm lấy trực tiếp từ tài liệu.
+   - Nếu tài liệu là tiếng Nhật và từ là Kanji, front_text chỉ ghi Kanji/từ gốc. KHÔNG thêm Hiragana/Furigana/Romaji/phiên âm ở mặt trước.
+   - Không lấy thuật ngữ từ ví dụ bên ngoài. Chỉ lấy front_text từ chính nội dung tài liệu được cung cấp.
+   - Không đặt front_text dưới dạng câu hỏi chung chung hoặc ghép nhiều thuật ngữ vào cùng một thẻ.
+   - KHÔNG tạo thẻ dạng so sánh từ, phân biệt từ, "A vs B", hoặc ghép 2 từ trên cùng một mặt trước. Mỗi flashcard chỉ học một từ/khái niệm.
+   - Nếu tài liệu có đoạn so sánh/phân biệt nhiều từ, hãy TÁCH thành nhiều flashcard riêng: mỗi từ là một thẻ độc lập. Không đặt chữ "vs", "khác nhau", "phân biệt", "違い", "使い分け" ở front_text.
 
-2. NGUYÊN TẮC MẶT SAU (back_text) - TRÌNH BÀY XUỐNG DÒNG RÕ RÀNG (\\n):
-   - Mặt sau chứa toàn bộ: Bản dịch tiếng Việt, Phiên âm/Cách đọc, Giải thích nghĩa/Ngữ pháp, và Câu ví dụ thực tế.
-   - BẮT BUỘC PHẢI DÙNG KÝ TỰ XUỐNG DÒNG (\\n) phân tách rõ ràng giữa các phần để người đọc nhìn thoáng mắt, dễ hiểu, không bị dính chữ trên 1 dòng dài!
+2. Mặt sau (back_text):
+   - Mặt sau mới hiển thị phiên âm/cách đọc nếu có, ví dụ Hiragana/Furigana/Romaji/Pinyin/IPA.
+   - Nếu tài liệu là tiếng Nhật và front_text có Kanji, back_text BẮT BUỘC có dòng "Phiên âm: <cách đọc bằng Hiragana/Katakana>". Với tài liệu không phải tiếng Nhật, không tự thêm Hiragana/Katakana.
+   - Mặt sau giải thích nghĩa tiếng Việt rõ ràng, loại từ nếu nhận diện được, sắc thái sử dụng nếu cần, và 1 câu ví dụ lấy theo ngữ cảnh tài liệu hoặc sát nội dung tài liệu.
+   - Trình bày bằng các dòng ngắn, dùng ký tự xuống dòng \\n trong chuỗi JSON.
 
 ================================================================================
-🎯 PHÂN LOẠI VÀ XỬ LÝ THEO TỪNG DẠNG NỘI DUNG TÀI LIỆU
+ĐỊNH DẠNG NỘI DUNG THẺ
 ================================================================================
 
-A. NẾU TÀI LIỆU LÀ TỪ VỰNG / THUẬT NGỮ / TỪ ĐIỂN:
-   - Mặt trước (front_text): Từ vựng gốc / Thuật ngữ (Ví dụ: "少女 (しょうじょ)" hoặc "Algorithm").
-   - Mặt sau (back_text):
-📌 Phiên âm / Loại từ: <Phát âm/Pinyin/Furigana/IPA nếu có> - <n/v/adj>
-📌 Nghĩa tiếng Việt: <Nghĩa chính xác>
-📝 Câu ví dụ: <1 câu ví dụ minh họa bằng ngôn ngữ gốc>
-(Dịch ví dụ: <Bản dịch câu ví dụ tiếng Việt>)
+Với từ vựng/thuật ngữ:
+- front_text: <chỉ từ gốc, không phiên âm nếu từ là Kanji>
+- back_text:
+Phiên âm: <Hiragana/Furigana/Romaji/Pinyin/IPA nếu có>
+Nghĩa tiếng Việt: <nghĩa chính xác>
+Giải thích: <giải thích ngắn, dễ hiểu>
+Ví dụ: <câu ví dụ bằng ngôn ngữ gốc>
+Dịch ví dụ: <bản dịch tiếng Việt>
 
-B. NẾU TÀI LIỆU LÀ PHÂN BIỆT / SO SÁNH TỪ VỰNG (Ví dụ: 交換 vs やり取り):
-   - Mặt trước (front_text): 「Từ 1」 vs 「Từ 2」 (Ví dụ: 「交換」 vs 「やり取り」)
-   - Mặt sau (back_text):
-📌 Nghĩa tiếng Việt:
-- <Từ 1>: <Nghĩa từ 1>
-- <Từ 2>: <Nghĩa từ 2>
+Với ngữ pháp/mẫu câu/ý chính:
+- front_text: <mẫu câu hoặc cụm trọng tâm ngắn>
+- back_text:
+Nghĩa tiếng Việt: <dịch nghĩa>
+Giải thích: <cách dùng hoặc ý chính>
+Ví dụ: <ví dụ minh họa>
+Dịch ví dụ: <bản dịch tiếng Việt>
 
-💡 Phân biệt chi tiết:
-- <Từ 1>: <Cách dùng & bối cảnh>
-- <Từ 2>: <Cách dùng & bối cảnh>
-
-📝 Ví dụ minh họa:
-- <Ví dụ 1>: <Câu ví dụ 1> (<Dịch nghĩa>)
-- <Ví dụ 2>: <Câu ví dụ 2> (<Dịch nghĩa>)
-
-C. NẾU TÀI LIỆU LÀ DỊCH CÂU / NGỮ PHÁP / ĐOẢN VĂN:
-   - Mặt trước (front_text): Mẫu câu ngắn hoặc Cụm từ trọng tâm của đoạn.
-   - Mặt sau (back_text):
-📌 Bản dịch tiếng Việt: <Dịch nghĩa tiếng Việt chuẩn xác>
-
-💡 Ngữ pháp & Ngữ cảnh: <Giải thích điểm ngữ pháp hoặc ý chính>
-
-📝 Ví dụ ứng dụng: <Mẫu câu tương tự kèm dịch nghĩa>
-
---- ⚠️ ĐỊNH DẠNG JSON ---
+--- ĐỊNH DẠNG JSON ---
 - Trả về đúng định dạng JSON array chứa { "front_text": "...", "back_text": "..." }.
 - Tất cả các dấu xuống dòng bên trong chuỗi JSON BẮT BUỘC phải viết dưới dạng \\n.
+- Không dùng dữ liệu mẫu, không tự bịa từ ngoài tài liệu. Chỉ tạo thẻ từ nội dung thật của tài liệu.
+- Nếu yêu cầu số lượng cụ thể, JSON array BẮT BUỘC có đúng số object tương ứng.
 
 Tài liệu:\n\n${text.substring(0, limit)}`;
 
-    const result = await generateWithRetry(model, prompt);
-    const responseText = result.response.text();
-    return safeJsonParse(responseText);
+    const generateAndSanitize = async (promptText) => {
+      const result = await generateWithRetry(model, promptText);
+      const responseText = result.response.text();
+      return sanitizeGeneratedFlashcards(safeJsonParse(responseText), text);
+    };
+
+    let flashcards = await generateAndSanitize(prompt);
+    if (hasRequestedCount && flashcards.length !== cardCount) {
+      const maxCompletionAttempts = 4;
+
+      for (let attempt = 1; attempt <= maxCompletionAttempts && flashcards.length < cardCount; attempt += 1) {
+        const missingCount = cardCount - flashcards.length;
+        const existingFronts = flashcards
+          .map(card => `- ${card.front_text}`)
+          .join('\n') || '- Chưa có thẻ hợp lệ nào';
+
+        const retryPrompt = `${prompt}
+
+Hệ thống đã kiểm tra và hiện mới có ${flashcards.length}/${cardCount} thẻ hợp lệ.
+Hãy tạo THÊM ĐÚNG ${missingCount} object flashcard mới, chỉ từ nội dung thật của tài liệu, không lặp các mặt trước đã có.
+
+Các front_text đã có, KHÔNG được lặp:
+${existingFronts}
+
+Nhắc lại:
+- Không dùng dữ liệu mẫu, không tự bịa ngoài tài liệu.
+- Mặt trước không được chứa Hiragana/Furigana/Romaji nếu từ là Kanji tiếng Nhật.
+- Mặt trước không được là dạng so sánh "A vs B" hoặc phân biệt từ.
+- Nếu nguồn có so sánh từ, hãy tách từng từ thành từng thẻ riêng.
+- Nếu tài liệu là tiếng Nhật và front_text có Kanji, back_text bắt buộc có phiên âm Hiragana/Katakana.
+- Mỗi object chỉ là một từ vựng/khái niệm/ý chính riêng.`;
+
+        const nextFlashcards = await generateAndSanitize(retryPrompt);
+        flashcards = mergeUniqueFlashcards(flashcards, nextFlashcards, cardCount, text);
+      }
+    }
+
+    if (hasRequestedCount && flashcards.length !== cardCount) {
+      throw new Error(`AI chỉ tạo được ${flashcards.length}/${cardCount} thẻ hợp lệ theo yêu cầu. Hệ thống không lưu kết quả sai định dạng hoặc sai số lượng, vui lòng thử lại.`);
+    }
+
+    return flashcards;
   } catch (err) {
     console.error('Error in Gemini generateFlashcards:', err);
     throw new Error(parseAiError(err, 'Không thể tự động tạo bộ flashcard từ tài liệu này.'));
   }
 };
 
-module.exports = { extractMetadata, summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, generateQuiz, generateFlashcards };
-
+module.exports = { extractMetadata, summarizeDocument, answerQuestion, answerQuestionStream, generateContentStreamWithRetry, generateQuiz, generateFlashcards, isValidGeneratedFlashcard };
