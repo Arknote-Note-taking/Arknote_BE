@@ -92,7 +92,7 @@ const startWorker = (io) => {
 
       await job.updateProgress(30);
 
-      const flashcardsData = await generateFlashcards(content, isPro, cardCount || 8);
+      const flashcardsData = await generateFlashcards(content, isPro, cardCount || (isPro ? 40 : 20));
       await job.updateProgress(80);
 
       let deck = existingDeck;

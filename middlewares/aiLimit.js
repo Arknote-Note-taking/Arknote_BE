@@ -13,22 +13,36 @@ const checkAiLimit = async (req, res, next) => {
     }
 
     // Fetch fresh user credits data from Supabase
-    const { data: user, error } = await supabase
+    let user = null;
+    let { data: userData, error } = await supabase
       .from('users')
       .select('ai_credits_remaining, is_pro, last_credit_reset_at')
       .eq('id', req.user.id)
       .single();
 
-    if (error || !user) {
+    if (error && (error.code === '42703' || error.message?.includes('last_credit_reset_at'))) {
+      // Column last_credit_reset_at does not exist in DB yet, query without it
+      const fallback = await supabase
+        .from('users')
+        .select('ai_credits_remaining, is_pro')
+        .eq('id', req.user.id)
+        .single();
+      userData = fallback.data;
+      error = fallback.error;
+    }
+
+    if (error || !userData) {
+      console.error('[checkAiLimit] Error fetching user from DB:', req.user?.id, error);
       return res.status(404).json({ error: 'Không tìm thấy người dùng trong hệ thống' });
     }
 
+    user = userData;
     const isPro = !!user.is_pro;
     const todayStr = new Date().toISOString().slice(0, 10);
     const lastResetStr = user.last_credit_reset_at ? new Date(user.last_credit_reset_at).toISOString().slice(0, 10) : '';
 
     // Check if new day: reset daily credits (30 for Free, 100 for Pro)
-    if (lastResetStr !== todayStr) {
+    if (user.last_credit_reset_at !== undefined && lastResetStr !== todayStr) {
       const resetCredits = isPro ? 100 : 30;
       const nowIso = new Date().toISOString();
       await supabase
@@ -37,7 +51,14 @@ const checkAiLimit = async (req, res, next) => {
           ai_credits_remaining: resetCredits,
           last_credit_reset_at: nowIso
         })
-        .eq('id', req.user.id);
+        .eq('id', req.user.id)
+        .catch(async () => {
+          // Fallback if update last_credit_reset_at fails
+          await supabase
+            .from('users')
+            .update({ ai_credits_remaining: resetCredits })
+            .eq('id', req.user.id);
+        });
 
       user.ai_credits_remaining = resetCredits;
     }

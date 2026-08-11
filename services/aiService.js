@@ -79,8 +79,8 @@ const generateWithRetry = async (model, prompt, maxRetries = 5) => {
       return await model.generateContent(prompt);
     } catch (err) {
       const errMsgStr = (err.message || '').toLowerCase();
-      const isDailyOrPermanentQuota = errMsgStr.includes('daily') || 
-        errMsgStr.includes('quota exceeded') || 
+      const isDailyOrPermanentQuota = errMsgStr.includes('daily') ||
+        errMsgStr.includes('quota exceeded') ||
         errMsgStr.includes('budget');
 
       const isTransient = !isDailyOrPermanentQuota && (
@@ -130,8 +130,8 @@ const generateContentStreamWithRetry = async (model, prompt, maxRetries = 5) => 
       return await model.generateContentStream(prompt);
     } catch (err) {
       const errMsgStr = (err.message || '').toLowerCase();
-      const isDailyOrPermanentQuota = errMsgStr.includes('daily') || 
-        errMsgStr.includes('quota exceeded') || 
+      const isDailyOrPermanentQuota = errMsgStr.includes('daily') ||
+        errMsgStr.includes('quota exceeded') ||
         errMsgStr.includes('budget');
 
       const isTransient = !isDailyOrPermanentQuota && (
@@ -353,25 +353,25 @@ const generateQuiz = async (text, isPro = true, count = 5) => {
           items: {
             type: 'object',
             properties: {
-              question: { 
-                type: 'string', 
-                description: 'Nội dung câu hỏi trắc nghiệm viết hoàn toàn bằng ngôn ngữ chính của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bản dịch tiếng Việt, không chứa giải thích hay phiên âm/Romaji.' 
+              question: {
+                type: 'string',
+                description: 'Nội dung câu hỏi trắc nghiệm viết hoàn toàn bằng ngôn ngữ chính của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bản dịch tiếng Việt, không chứa giải thích hay phiên âm/Romaji.'
               },
               options: {
                 type: 'array',
-                items: { 
+                items: {
                   type: 'string',
                   description: 'Một phương án lựa chọn viết HOÀN TOÀN bằng ngôn ngữ gốc của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bất kỳ nghĩa dịch tiếng Việt, giải thích hay Romaji/phiên âm nào trong chuỗi này.'
                 },
                 description: '4 đáp án lựa chọn (A, B, C, D) viết hoàn toàn bằng ngôn ngữ chính của tài liệu (ví dụ: tiếng Nhật). TUYỆT ĐỐI KHÔNG ĐƯỢC chứa bản dịch tiếng Việt, không chứa giải thích hay phiên âm/Romaji.'
               },
-              answer: { 
-                type: 'string', 
-                description: 'Đáp án đúng (phải trùng khớp hoàn toàn với một trong bốn chuỗi ký tự trong options, viết hoàn toàn bằng ngôn ngữ chính của tài liệu).' 
+              answer: {
+                type: 'string',
+                description: 'Đáp án đúng (phải trùng khớp hoàn toàn với một trong bốn chuỗi ký tự trong options, viết hoàn toàn bằng ngôn ngữ chính của tài liệu).'
               },
-              explanation: { 
-                type: 'string', 
-                description: 'Giải thích chi tiết tại sao đáp án đó đúng bằng tiếng Việt (BẮT BUỘC bao gồm cả bản dịch tiếng Việt, phiên âm/cách phát âm/Romaji của câu hỏi và các đáp án để người học đối chiếu học tập sau khi nộp bài).' 
+              explanation: {
+                type: 'string',
+                description: 'Giải thích chi tiết tại sao đáp án đó đúng bằng tiếng Việt (BẮT BUỘC bao gồm cả bản dịch tiếng Việt, phiên âm/cách phát âm/Romaji của câu hỏi và các đáp án để người học đối chiếu học tập sau khi nộp bài).'
               }
             },
             required: ['question', 'options', 'answer', 'explanation']
@@ -484,8 +484,9 @@ Câu hỏi hiện tại của người dùng: ${question}`;
   }
 };
 
-const generateFlashcards = async (text, isPro = true, count = 10) => {
-  const cardCount = count || 10;
+const generateFlashcards = async (text, isPro = true, count = null) => {
+  const defaultCount = isPro ? 40 : 20;
+  const cardCount = count ? parseInt(count, 10) : defaultCount;
 
   if (useMock) {
     const mockFlashcards = [];
@@ -514,30 +515,70 @@ const generateFlashcards = async (text, isPro = true, count = 10) => {
             required: ['front_text', 'back_text']
           }
         },
-        maxOutputTokens: 4096
+        maxOutputTokens: 8192
       }
     });
 
-    const limit = isPro ? 20000 : 8000;
-    const prompt = `Tạo một bộ thẻ ghi nhớ (flashcard) gồm đúng ${cardCount} thẻ dựa trên nội dung tài liệu sau.
-Yêu cầu về tư duy sư phạm và thiết lập thẻ ghi nhớ linh hoạt:
-- KHÔNG TRÍCH XUẤT THỤ ĐỘNG: Đừng chỉ sao chép hoặc dịch nghĩa thô cứng từng từ một.
-- TẠO PHẢN XẠ GIAO TIẾP: Đối với các mẫu câu, hội thoại hoặc câu hỏi xuất hiện trong tài liệu (ví dụ: "日本りょうり は どうですか？"):
-  + Mặt trước (front_text) phải là câu hỏi hoặc tình huống giao tiếp viết bằng chính ngôn ngữ nước ngoài đó (ví dụ: "日本りょうり は どうですか？").
-  + Mặt sau (back_text) phải là câu trả lời giao tiếp hợp lý, tự nhiên nhất bằng ngôn ngữ đó (ví dụ: "美味しいですが、値段が高いです") kèm theo cách phát âm/cách đọc và nghĩa tiếng Việt tương ứng để người học vừa ghi nhớ từ vựng vừa luyện phản xạ giao tiếp.
+    const limit = isPro ? 25000 : 10000;
+    const promptCountText = isPro && (!count || count >= 30)
+      ? 'tất cả các từ vựng, thuật ngữ, mẫu ngữ pháp và nội dung cốt lõi có trong tài liệu (tối đa 40-50 thẻ đầy đủ nhất)'
+      : `đúng ${cardCount} thẻ ghi nhớ`;
 
-Yêu cầu về ngôn ngữ và nội dung thẻ ghi nhớ:
-1. Hãy tự động nhận diện ngôn ngữ chính của tài liệu.
-2. Nếu tài liệu bằng tiếng Việt: Mặt trước (front_text) là câu hỏi ngắn hoặc khái niệm bằng tiếng Việt, mặt sau (back_text) là câu trả lời ngắn gọn hoặc định nghĩa bằng tiếng Việt.
-3. Nếu tài liệu bằng tiếng nước ngoài hoặc là tài liệu học ngoại ngữ (ví dụ: tiếng Nhật, tiếng Trung, tiếng Hàn, tiếng Anh, v.v.):
-   - Các thẻ ghi nhớ phải được thiết kế để giúp người ôn tập học và luyện tập ngôn ngữ đó. Không dịch toàn bộ câu chữ sang tiếng Việt ở cả hai mặt.
-   - Mặt trước (front_text) phải chứa từ vựng, mẫu ngữ pháp, cụm từ, câu ví dụ hoặc câu hỏi giao tiếp viết bằng chính ngôn ngữ nước ngoài đó (ví dụ: tiếng Nhật).
-   - Mặt sau (back_text) phải chứa nghĩa tiếng Việt, cách phát âm/phiên âm/cách đọc (như Romaji/Furigana cho tiếng Nhật, Pinyin cho tiếng Trung nếu có), và lời giải nghĩa hoặc câu trả lời tự nhiên bằng ngôn ngữ gốc kèm tiếng Việt để hỗ trợ học tập hiệu quả.
+    const prompt = `Bạn là một chuyên gia sư phạm & AI thiết kế Flashcards học tập đỉnh cao.
+Hãy ĐỌC KỸ và PHÂN TÍCH CHUYÊN SÂU NỘI DUNG TÀI LIỆU dưới đây để tạo ${promptCountText} ĐẠT TIÊU CHUẨN SƯ PHẠM CAO NHẤT.
 
-ĐẶC BIỆT LƯU Ý VỀ ĐỊNH DẠNG JSON:
-- Phải đảm bảo trả về định dạng JSON hợp lệ tuyệt đối, khớp với schema đã cho.
-- Không được chứa các ký tự xuống dòng (newline) trực tiếp trong các chuỗi ký tự JSON. Tất cả các dấu xuống dòng (nếu có) phải được viết dưới dạng \\n.
-- Tất cả dấu nháy kép bên trong giá trị chuỗi phải được escape bằng dấu gạch chéo ngược (ví dụ: \\\").
+================================================================================
+⚠️ NGUYÊN TẮC VÀNG BẮT BUỘC DÀNH CHO MẶT TRƯỚC (front_text) VÀ MẶT SAU (back_text)
+================================================================================
+
+1. NGUYÊN TẮC MẶT TRƯỚC (front_text):
+   - TUYỆT ĐỐI KHÔNG ĐẶT CÂU HỎI DÀI NGUYÊN VĂN (Ví dụ CẤM: "..." と "..." の違いは何ですか？ hoặc "Từ này nghĩa là gì trong tiếng Việt?").
+   - MẶT TRƯỚC CHỈ ĐƯỢC CHỨA TỪ VỰNG / THUẬT NGỮ / CỤM TỪ / NGUYÊN MẪU NGẮN GỌN (Ví dụ ĐÚNG: "交換 (こうかん)", "やり取りする", "Subsequent (adj)", hoặc "「交換」 vs 「やり取り」").
+   - Nếu là tài liệu từ vựng hoặc so sánh từ: Mặt trước BẮT BUỘC chỉ là chính từ vựng đó hoặc cụm 2 từ ngắn gọn. Không chứa câu hỏi lằng nhằng.
+
+2. NGUYÊN TẮC MẶT SAU (back_text) - TRÌNH BÀY XUỐNG DÒNG RÕ RÀNG (\\n):
+   - Mặt sau chứa toàn bộ: Bản dịch tiếng Việt, Phiên âm/Cách đọc, Giải thích nghĩa/Ngữ pháp, và Câu ví dụ thực tế.
+   - BẮT BUỘC PHẢI DÙNG KÝ TỰ XUỐNG DÒNG (\\n) phân tách rõ ràng giữa các phần để người đọc nhìn thoáng mắt, dễ hiểu, không bị dính chữ trên 1 dòng dài!
+
+================================================================================
+🎯 PHÂN LOẠI VÀ XỬ LÝ THEO TỪNG DẠNG NỘI DUNG TÀI LIỆU
+================================================================================
+
+A. NẾU TÀI LIỆU LÀ TỪ VỰNG / THUẬT NGỮ / TỪ ĐIỂN:
+   - Mặt trước (front_text): Từ vựng gốc / Thuật ngữ (Ví dụ: "少女 (しょうじょ)" hoặc "Algorithm").
+   - Mặt sau (back_text):
+📌 Phiên âm / Loại từ: <Phát âm/Pinyin/Furigana/IPA nếu có> - <n/v/adj>
+📌 Nghĩa tiếng Việt: <Nghĩa chính xác>
+📝 Câu ví dụ: <1 câu ví dụ minh họa bằng ngôn ngữ gốc>
+(Dịch ví dụ: <Bản dịch câu ví dụ tiếng Việt>)
+
+B. NẾU TÀI LIỆU LÀ PHÂN BIỆT / SO SÁNH TỪ VỰNG (Ví dụ: 交換 vs やり取り):
+   - Mặt trước (front_text): 「Từ 1」 vs 「Từ 2」 (Ví dụ: 「交換」 vs 「やり取り」)
+   - Mặt sau (back_text):
+📌 Nghĩa tiếng Việt:
+- <Từ 1>: <Nghĩa từ 1>
+- <Từ 2>: <Nghĩa từ 2>
+
+💡 Phân biệt chi tiết:
+- <Từ 1>: <Cách dùng & bối cảnh>
+- <Từ 2>: <Cách dùng & bối cảnh>
+
+📝 Ví dụ minh họa:
+- <Ví dụ 1>: <Câu ví dụ 1> (<Dịch nghĩa>)
+- <Ví dụ 2>: <Câu ví dụ 2> (<Dịch nghĩa>)
+
+C. NẾU TÀI LIỆU LÀ DỊCH CÂU / NGỮ PHÁP / ĐOẢN VĂN:
+   - Mặt trước (front_text): Mẫu câu ngắn hoặc Cụm từ trọng tâm của đoạn.
+   - Mặt sau (back_text):
+📌 Bản dịch tiếng Việt: <Dịch nghĩa tiếng Việt chuẩn xác>
+
+💡 Ngữ pháp & Ngữ cảnh: <Giải thích điểm ngữ pháp hoặc ý chính>
+
+📝 Ví dụ ứng dụng: <Mẫu câu tương tự kèm dịch nghĩa>
+
+--- ⚠️ ĐỊNH DẠNG JSON ---
+- Trả về đúng định dạng JSON array chứa { "front_text": "...", "back_text": "..." }.
+- Tất cả các dấu xuống dòng bên trong chuỗi JSON BẮT BUỘC phải viết dưới dạng \\n.
 
 Tài liệu:\n\n${text.substring(0, limit)}`;
 

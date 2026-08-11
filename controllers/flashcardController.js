@@ -178,7 +178,7 @@ const generateAiFlashcards = async (req, res) => {
     }
 
     const userPro = await isUserPro(req.user.id);
-    const cardCount = count ? parseInt(count, 10) : 8;
+    const cardCount = count ? parseInt(count, 10) : (userPro ? 40 : 20);
 
     // Check cache: if a deck with cards already exists, return them directly unless forceRegenerate is requested
     const { data: existingDecks, error: deckSelectErr } = await supabase
