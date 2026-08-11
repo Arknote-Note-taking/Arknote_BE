@@ -1,7 +1,6 @@
 const supabase = require('../config/supabaseClient');
-const { generateFlashcards } = require('../services/aiService');
+const { generateFlashcards, isValidGeneratedFlashcard } = require('../services/aiService');
 const { isUserPro } = require('./userController');
-const { retrieveRelevantChunks } = require('../services/ragService');
 const { enqueueAiJob } = require('../services/jobQueue');
 const crypto = require('crypto');
 
@@ -14,8 +13,17 @@ const getDeckHash = (description) => {
 const cleanDeckDescription = (deck) => {
   if (deck && deck.description) {
     deck.description = deck.description.replace(/\|\|\|hash:[a-f0-9]{32}/g, '').trim();
+    deck.description = deck.description.replace(/\|\|\|count:\d+/g, '').trim();
   }
   return deck;
+};
+
+const chunkArray = (items, size) => {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
 };
 
 const cleanQuizQuestions = (quiz) => {
@@ -146,7 +154,8 @@ const generateAiFlashcards = async (req, res) => {
     if (req.user.role === 'admin') {
       return res.status(403).json({ error: 'Admin không thể tạo flashcard.' });
     }
-    const { documentId, count } = req.body;
+    const { documentId } = req.body;
+    const rawRequestedCount = req.body.count ?? req.body.requestedCount;
     console.log("SUPABASE_KEY inside controller:", process.env.SUPABASE_KEY ? process.env.SUPABASE_KEY.substring(0, 15) : 'undefined');
     if (!documentId) return res.status(400).json({ error: 'Mã tài liệu là bắt buộc' });
 
@@ -178,7 +187,12 @@ const generateAiFlashcards = async (req, res) => {
     }
 
     const userPro = await isUserPro(req.user.id);
-    const cardCount = count ? parseInt(count, 10) : (userPro ? 40 : 20);
+    const requestedExactCount = rawRequestedCount !== undefined && rawRequestedCount !== null && rawRequestedCount !== '';
+    const parsedRequestedCount = requestedExactCount ? parseInt(rawRequestedCount, 10) : null;
+    if (requestedExactCount && (!Number.isFinite(parsedRequestedCount) || parsedRequestedCount < 1)) {
+      return res.status(400).json({ error: 'Số lượng thẻ yêu cầu phải là số nguyên dương.' });
+    }
+    const cardCount = requestedExactCount ? parsedRequestedCount : (userPro ? 40 : 20);
 
     // Check cache: if a deck with cards already exists, return them directly unless forceRegenerate is requested
     const { data: existingDecks, error: deckSelectErr } = await supabase
@@ -207,7 +221,7 @@ const generateAiFlashcards = async (req, res) => {
           .select('*')
           .eq('deck_id', existingDeck.id);
 
-        if (!cardsSelectErr && existingCards && existingCards.length > 0) {
+        if (!cardsSelectErr && existingCards && existingCards.length > 0 && (!requestedExactCount || existingCards.length === cardCount)) {
           return res.status(200).json({ deck: cleanDeckDescription(existingDeck), cards: existingCards });
         }
       }
@@ -237,10 +251,12 @@ const generateAiFlashcards = async (req, res) => {
       documentId,
       userId: req.user.id,
       cardCount,
+      requestedCount: cardCount,
       isPro: userPro || req.user.role === 'admin',
       deckTitle: doc.title,
       forceRegenerate: !!req.body.forceRegenerate,
       mode: req.body.mode,
+      requestedExactCount,
       ignoreHashCheck: !!req.body.ignoreHashCheck,
       currentHash
     });
@@ -251,22 +267,34 @@ const generateAiFlashcards = async (req, res) => {
     }
 
     // ---- Fallback: synchronous execution (no Redis) ----
-    // Use RAG to retrieve the most relevant chunks for flashcard generation; fall back to full content
-    const ragContext = await retrieveRelevantChunks(documentId, 'Tạo bộ flashcard ôn tập kiến thức từ tài liệu này');
-    const contentForFlashcards = ragContext || doc.content;
-    console.log(`[Flashcard] Using ${ragContext ? 'RAG context' : 'full doc content'} for document: ${documentId}`);
+    // Flashcard generation must use the whole document so requested counts are based on real full content.
+    const contentForFlashcards = doc.content || '';
+    console.log(`[Flashcard] Using full doc content for document: ${documentId}`);
 
     // Call AI service to generate flashcards
-    const flashcardsData = await generateFlashcards(contentForFlashcards, userPro || req.user.role === 'admin', cardCount);
+    const generatedFlashcards = await generateFlashcards(contentForFlashcards, userPro || req.user.role === 'admin', cardCount);
+    const flashcardsData = Array.isArray(generatedFlashcards)
+      ? generatedFlashcards.filter(card => isValidGeneratedFlashcard(card, contentForFlashcards)).slice(0, cardCount)
+      : [];
+
+    if (requestedExactCount && flashcardsData.length !== cardCount) {
+      return res.status(422).json({
+        error: `AI chỉ tạo được ${flashcardsData.length}/${cardCount} thẻ hợp lệ. Hệ thống đã chặn thẻ so sánh hoặc thẻ Kanji thiếu phiên âm, vui lòng tạo lại.`
+      });
+    }
 
     let deck = existingDeck;
     if (deck) {
-      if (req.body.mode === 'overwrite') {
+      if (req.body.mode === 'overwrite' || (requestedExactCount && req.body.mode !== 'merge')) {
         // Overwrite mode: delete all existing cards first
         await supabase.from('flashcards').delete().eq('deck_id', deck.id);
       }
       
-      const newDesc = ((deck.description || 'Tạo tự động bằng AI từ tài liệu').replace(/\|\|\|hash:[a-f0-9]{32}/g, '').trim() + ' |||hash:' + currentHash).trim();
+      const baseDesc = (deck.description || 'Tạo tự động bằng AI từ tài liệu')
+        .replace(/\|\|\|hash:[a-f0-9]{32}/g, '')
+        .replace(/\|\|\|count:\d+/g, '')
+        .trim();
+      const newDesc = `${baseDesc} |||hash:${currentHash} |||count:${cardCount}`.trim();
       const { data: updatedDeck, error: deckUpdateErr } = await supabase
         .from('flashcard_decks')
         .update({ description: newDesc })
@@ -284,7 +312,7 @@ const generateAiFlashcards = async (req, res) => {
           user_id: req.user.id,
           document_id: documentId,
           title: doc.title,
-          description: `Tạo tự động bằng AI từ tài liệu |||hash:${currentHash}`
+          description: `Tạo tự động bằng AI từ tài liệu |||hash:${currentHash} |||count:${cardCount}`
         }])
         .select()
         .single();
@@ -545,6 +573,56 @@ const createCard = async (req, res) => {
   }
 };
 
+// 8b. Create multiple flashcards inside deck from user-provided text
+const createBulkCards = async (req, res) => {
+  try {
+    const { deckId } = req.params;
+    const rawCards = Array.isArray(req.body.cards) ? req.body.cards : [];
+    const cards = rawCards
+      .map(card => ({
+        front_text: String(card?.front_text || '').trim(),
+        back_text: String(card?.back_text || '').trim()
+      }))
+      .filter(card => card.front_text && card.back_text);
+
+    if (cards.length === 0) {
+      return res.status(400).json({ error: 'Vui lòng nhập ít nhất một thẻ hợp lệ có đủ mặt trước và mặt sau.' });
+    }
+
+    const { data: deck, error: getErr } = await supabase
+      .from('flashcard_decks')
+      .select('user_id')
+      .eq('id', deckId)
+      .single();
+
+    if (getErr || !deck) return res.status(404).json({ error: 'Không tìm thấy bộ Flashcard' });
+    if (deck.user_id !== req.user.id) {
+      return res.status(403).json({ error: 'Access forbidden: Chỉ chủ sở hữu mới có quyền thêm thẻ vào bộ Flashcard này.' });
+    }
+
+    const cardsToInsert = cards.map(card => ({
+      deck_id: deckId,
+      front_text: card.front_text,
+      back_text: card.back_text
+    }));
+
+    const insertedCards = [];
+    for (const batch of chunkArray(cardsToInsert, 500)) {
+      const { data: batchCards, error } = await supabase
+        .from('flashcards')
+        .insert(batch)
+        .select();
+
+      if (error) throw error;
+      insertedCards.push(...(batchCards || []));
+    }
+
+    res.status(201).json({ cards: insertedCards || [] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // 9. Update individual flashcard
 const updateCard = async (req, res) => {
   try {
@@ -625,6 +703,52 @@ const deleteCard = async (req, res) => {
     }
 
     res.status(200).json({ message: 'Xóa Flashcard thành công' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// 10b. Delete multiple flashcards
+const deleteBulkCards = async (req, res) => {
+  try {
+    const cardIds = Array.isArray(req.body.cardIds)
+      ? req.body.cardIds.map(id => String(id || '').trim()).filter(Boolean)
+      : [];
+
+    if (cardIds.length === 0) {
+      return res.status(400).json({ error: 'Vui lòng chọn ít nhất một thẻ ghi nhớ để xóa.' });
+    }
+
+    const cards = [];
+    for (const batch of chunkArray(cardIds, 500)) {
+      const { data: batchCards, error: cardsErr } = await supabase
+        .from('flashcards')
+        .select('id, flashcard_decks(user_id)')
+        .in('id', batch);
+
+      if (cardsErr) throw cardsErr;
+      cards.push(...(batchCards || []));
+    }
+
+    if (!cards || cards.length !== cardIds.length) {
+      return res.status(404).json({ error: 'Một số thẻ ghi nhớ không tồn tại.' });
+    }
+
+    const forbiddenCard = cards.find(card => card.flashcard_decks?.user_id !== req.user.id && req.user.role !== 'admin');
+    if (forbiddenCard) {
+      return res.status(403).json({ error: 'Access forbidden: Bạn không có quyền xóa một số thẻ đã chọn.' });
+    }
+
+    for (const batch of chunkArray(cardIds, 500)) {
+      const { error } = await supabase
+        .from('flashcards')
+        .delete()
+        .in('id', batch);
+
+      if (error) throw error;
+    }
+
+    res.status(200).json({ deletedIds: cardIds });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -832,8 +956,10 @@ module.exports = {
   updateDeck,
   deleteDeck,
   createCard,
+  createBulkCards,
   updateCard,
   deleteCard,
+  deleteBulkCards,
   createQuizFromDeck,
   importDeck
 };

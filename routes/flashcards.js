@@ -11,8 +11,10 @@ const {
   updateDeck,
   deleteDeck,
   createCard,
+  createBulkCards,
   updateCard,
   deleteCard,
+  deleteBulkCards,
   createQuizFromDeck,
   importDeck
 } = require('../controllers/flashcardController');
@@ -104,7 +106,10 @@ router.post('/:id/import', importDeck);
 
 // Individual card CRUD endpoints
 router.post('/:deckId/cards', createCard);
+router.post('/:deckId/cards/bulk', createBulkCards);
 router.put('/cards/:cardId', updateCard);
+router.post('/cards/bulk-delete', deleteBulkCards);
+router.delete('/cards/bulk', deleteBulkCards);
 router.delete('/cards/:cardId', deleteCard);
 
 module.exports = router;

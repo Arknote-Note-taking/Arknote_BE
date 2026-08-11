@@ -1,6 +1,6 @@
 const { Worker } = require('bullmq');
 const supabase = require('../config/supabaseClient');
-const { generateFlashcards, generateQuiz } = require('../services/aiService');
+const { generateFlashcards, generateQuiz, isValidGeneratedFlashcard } = require('../services/aiService');
 const { retrieveRelevantChunks } = require('../services/ragService');
 const { getConnection } = require('../services/jobQueue');
 const crypto = require('crypto');
@@ -14,6 +14,7 @@ const getDeckHash = (description) => {
 const cleanDeckDescription = (deck) => {
   if (deck && deck.description) {
     deck.description = deck.description.replace(/\|\|\|hash:[a-f0-9]{32}/g, '').trim();
+    deck.description = deck.description.replace(/\|\|\|count:\d+/g, '').trim();
   }
   return deck;
 };
@@ -49,7 +50,9 @@ const startWorker = (io) => {
 
     // ---------- GENERATE FLASHCARDS ----------
     if (type === 'generate_flashcards') {
-      const { documentId, userId, cardCount, isPro, deckTitle, forceRegenerate, mode, currentHash } = data;
+      const { documentId, userId, cardCount, requestedCount, isPro, deckTitle, forceRegenerate, mode, currentHash, requestedExactCount } = data;
+      const parsedRequestedCount = parseInt(requestedCount ?? cardCount, 10);
+      const requestedCardCount = Number.isFinite(parsedRequestedCount) ? parsedRequestedCount : (isPro ? 40 : 20);
 
       // Check cache first
       const { data: existingDecks } = await supabase
@@ -66,7 +69,7 @@ const startWorker = (io) => {
           .select('*')
           .eq('deck_id', existingDeck.id);
 
-        if (existingCards && existingCards.length > 0) {
+        if (existingCards && existingCards.length > 0 && (!requestedExactCount || existingCards.length === requestedCardCount)) {
           io?.emit(`job_done:${job.id}`, {
             type: 'flashcards',
             deck: cleanDeckDescription(existingDeck),
@@ -86,23 +89,33 @@ const startWorker = (io) => {
 
       if (!doc) throw new Error('Document not found');
 
-      // RAG retrieval
-      const ragContext = await retrieveRelevantChunks(documentId, 'Tạo bộ flashcard ôn tập kiến thức từ tài liệu này');
-      const content = ragContext || doc.content;
+      // Flashcard generation must use the whole document so requested counts are based on real full content.
+      const content = doc.content || '';
 
       await job.updateProgress(30);
 
-      const flashcardsData = await generateFlashcards(content, isPro, cardCount || (isPro ? 40 : 20));
+      const generatedFlashcards = await generateFlashcards(content, isPro, requestedCardCount);
+      const flashcardsData = Array.isArray(generatedFlashcards)
+        ? generatedFlashcards.filter(card => isValidGeneratedFlashcard(card, content)).slice(0, requestedCardCount)
+        : [];
+
+      if (requestedExactCount && flashcardsData.length !== requestedCardCount) {
+        throw new Error(`AI chỉ tạo được ${flashcardsData.length}/${requestedCardCount} thẻ hợp lệ. Hệ thống đã chặn thẻ so sánh hoặc thẻ Kanji thiếu phiên âm, vui lòng tạo lại.`);
+      }
       await job.updateProgress(80);
 
       let deck = existingDeck;
       if (deck) {
-        if (mode === 'overwrite') {
+        if (mode === 'overwrite' || (requestedExactCount && mode !== 'merge')) {
           // Overwrite mode: delete all existing cards first
           await supabase.from('flashcards').delete().eq('deck_id', deck.id);
         }
         
-        const newDesc = ((deck.description || 'Tạo tự động bằng AI từ tài liệu').replace(/\|\|\|hash:[a-f0-9]{32}/g, '').trim() + ' |||hash:' + currentHash).trim();
+        const baseDesc = (deck.description || 'Tạo tự động bằng AI từ tài liệu')
+          .replace(/\|\|\|hash:[a-f0-9]{32}/g, '')
+          .replace(/\|\|\|count:\d+/g, '')
+          .trim();
+        const newDesc = `${baseDesc} |||hash:${currentHash} |||count:${requestedCardCount}`.trim();
         const { data: updatedDeck, error: deckUpdateErr } = await supabase
           .from('flashcard_decks')
           .update({ description: newDesc })
@@ -120,7 +133,7 @@ const startWorker = (io) => {
             user_id: userId,
             document_id: documentId,
             title: deckTitle || doc.title,
-            description: `Tạo tự động bằng AI từ tài liệu |||hash:${currentHash}`
+            description: `Tạo tự động bằng AI từ tài liệu |||hash:${currentHash} |||count:${requestedCardCount}`
           }])
           .select()
           .single();
